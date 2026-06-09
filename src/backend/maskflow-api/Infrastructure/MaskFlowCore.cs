@@ -92,7 +92,7 @@ public sealed class MaskFlowStore
         var salt = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
         var user = new User(State.NextUserId++, email, HashPassword(password, salt), salt, "free", 10L * 1024 * 1024 * 1024, 0, DateTimeOffset.UtcNow, username, "", null);
         State.Users.Add(user);
-        State.Quotas[user.Id.ToString()] = new AiQuota("free", 50, 0, DateOnly.FromDateTime(DateTime.UtcNow));
+        State.Quotas[user.Id.ToString()] = new AiQuota("free", ResolveDailyLimit("free"), 0, DateOnly.FromDateTime(DateTime.UtcNow));
         State.TeamMembers.Add(new TeamMember("mem_owner_" + user.Id, user.Id, email, "owner", "active", DateTimeOffset.UtcNow));
         State.Devices.Add(new AccountDevice("dev_" + Util.Id(), user.Id, "Current browser", context.Connection.RemoteIpAddress?.ToString(), context.Request.Headers.UserAgent.ToString(), DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
         var token = CreateSession(user.Id);
@@ -143,9 +143,31 @@ public sealed class MaskFlowStore
         return true;
     }
 
+    static int ResolveDailyLimit(string plan)
+    {
+        var overrideLimit = Environment.GetEnvironmentVariable("MASKFLOW_AI_DAILY_LIMIT");
+        if (!string.IsNullOrWhiteSpace(overrideLimit) && int.TryParse(overrideLimit, out var parsed) && parsed > 0)
+        {
+            return parsed;
+        }
+
+        return plan switch { "pro" => 1000, "team" => 100000, _ => 50 };
+    }
+
+    public void EnsureAiQuotaAvailable(User user, int amount = 1)
+    {
+        var quota = GetQuota(user);
+        if (quota.DailyUsed + amount > quota.DailyLimit)
+        {
+            throw new BadHttpRequestException(
+                $"Daily AI quota exceeded. Used {quota.DailyUsed}/{quota.DailyLimit} today (UTC).",
+                429);
+        }
+    }
+
     public async Task UpdatePlanAsync(int userId, string plan)
     {
-        var limit = plan switch { "pro" => 1000, "team" => 100000, _ => 50 };
+        var limit = ResolveDailyLimit(plan);
         var quota = plan switch { "pro" => 50L * 1024 * 1024 * 1024, "team" => 500L * 1024 * 1024 * 1024, _ => 10L * 1024 * 1024 * 1024 };
         var user = GetUser(userId)!;
         State.Users.Remove(user);
@@ -157,10 +179,16 @@ public sealed class MaskFlowStore
     public AiQuota GetQuota(User user)
     {
         var key = user.Id.ToString();
-        if (!State.Quotas.TryGetValue(key, out var quota) || quota.DailyResetAt < DateOnly.FromDateTime(DateTime.UtcNow))
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        if (!State.Quotas.TryGetValue(key, out var quota) || quota.DailyResetAt < today)
         {
-            var limit = user.Plan switch { "pro" => 1000, "team" => 100000, _ => 50 };
-            quota = new AiQuota(user.Plan, limit, 0, DateOnly.FromDateTime(DateTime.UtcNow));
+            var limit = ResolveDailyLimit(user.Plan);
+            quota = new AiQuota(user.Plan, limit, 0, today);
+            State.Quotas[key] = quota;
+        }
+        else if (quota.DailyLimit != ResolveDailyLimit(user.Plan))
+        {
+            quota = quota with { Plan = user.Plan, DailyLimit = ResolveDailyLimit(user.Plan) };
             State.Quotas[key] = quota;
         }
         return quota;

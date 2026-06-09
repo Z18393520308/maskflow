@@ -19,6 +19,15 @@ public sealed class AnnotationController : ControllerBase
     public async Task<IActionResult> Auto([FromBody] AnnotationAutoRequest request)
     {
         var user = store.RequireUser(HttpContext);
+        try
+        {
+            store.EnsureAiQuotaAvailable(user);
+        }
+        catch (BadHttpRequestException ex)
+        {
+            return StatusCode(ex.StatusCode, new { detail = ex.Message });
+        }
+
         var file = store.State.Files.FirstOrDefault(x => x.Id == request.FileId && x.UserId == user.Id);
         if (file is null || !await store.StoredObjectExistsAsync(file.Path)) return NotFound(new { detail = "File not found." });
 
@@ -57,6 +66,10 @@ public sealed class AnnotationController : ControllerBase
             await store.ConsumeAiQuotaAsync(user.Id, 1);
             await store.SaveAsync();
             return Ok(new { annotation = set, user = store.PublicUser(store.GetUser(user.Id)!) });
+        }
+        catch (BadHttpRequestException ex)
+        {
+            return StatusCode(ex.StatusCode, new { detail = ex.Message });
         }
         catch (HttpRequestException ex)
         {
