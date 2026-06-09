@@ -5860,10 +5860,16 @@ body:has(.app-sidebar) {
 }
 
 .label-chip-list {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: 8px;
   margin-top: 12px;
+}
+
+.label-chip-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
 }
 
 .label-chip {
@@ -5875,6 +5881,11 @@ body:has(.app-sidebar) {
   padding: 0 11px;
   font-size: 13px;
   font-weight: 900;
+  text-align: left;
+}
+
+.label-manager-inline .label-delete-btn {
+  min-width: 52px;
 }
 
 .label-chip:hover {

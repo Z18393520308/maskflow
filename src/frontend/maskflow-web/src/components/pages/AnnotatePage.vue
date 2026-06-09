@@ -108,7 +108,17 @@
               <button class="btn compact-btn" type="button" @click="addAnnotateLabel">新增</button>
             </div>
             <div class="label-chip-list">
-              <button v-for="label in annotate.labels" :key="label" type="button" class="label-chip" @click="applyLabelToActive(label)">{{ label }}</button>
+              <div v-for="label in annotate.labels" :key="label" class="label-chip-row">
+                <button type="button" class="label-chip" @click="applyLabelToActive(label)">{{ label }}</button>
+                <button
+                  class="label-delete-btn"
+                  type="button"
+                  :disabled="label === 'object' || loading"
+                  @click="deleteAnnotateLabel(label)"
+                >
+                  {{ label === 'object' ? '默认' : '删除' }}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -145,6 +155,7 @@ const segmentPoints = inject("segmentPoints");
 const yoloFrameStyle = inject("yoloFrameStyle");
 const updateYoloFrame = inject("updateYoloFrame");
 const addAnnotateLabel = inject("addAnnotateLabel");
+const deleteAnnotateLabel = inject("deleteAnnotateLabel");
 const applyLabelToActive = inject("applyLabelToActive");
 const syncAnnotationLabels = inject("syncAnnotationLabels");
 const toggleAnnotationConfirmed = inject("toggleAnnotationConfirmed");
