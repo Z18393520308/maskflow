@@ -84,7 +84,7 @@ public sealed class MySqlMaskFlowRepository : IMaskFlowRepository
                     [x.Id, x.Email, x.PasswordHash, x.Salt, x.Plan, x.QuotaBytes, x.UsedBytes, x.CreatedAt, x.Username, x.Phone, x.AvatarPath]);
 
             foreach (var x in state.Sessions)
-                await InsertAsync(connection, tx, "sessions", ["token", "user_id", "created_at"], [x.Token, x.UserId, x.CreatedAt, x.ExpiresAt]);
+                await InsertAsync(connection, tx, "sessions", ["token", "user_id", "created_at", "expires_at"], [x.Token, x.UserId, x.CreatedAt, x.ExpiresAt]);
 
             foreach (var x in state.Projects)
                 await InsertAsync(connection, tx, "projects",
