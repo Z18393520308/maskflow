@@ -1,0 +1,78 @@
+services:
+  sam-inference:
+    build:
+      context: ./src/ai/sam-inference
+      dockerfile: Dockerfile
+    image: maskflow-sam-inference:latest
+    container_name: maskflow-sam-inference
+    expose:
+      - "8001"
+    ports:
+      - "8001:8001"
+    environment:
+      SAM3_MODEL: /models/sam3.pt
+      SAM3_MAX_INFERENCE_SIDE: "1024"
+      SAM3_ENABLE_CLIP_CLASSIFICATION: "true"
+      SAM3_INCLUDE_CATEGORY_OVERLAYS: "true"
+      SAM3_CORS_ORIGINS: "*"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ./资源/模型/sam3.pt:/models/sam3.pt:ro
+    gpus: all
+    shm_size: "8gb"
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: maskflow-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./src/backend/maskflow-api
+      dockerfile: Dockerfile
+    image: maskflow-api-dotnet:latest
+    container_name: maskflow-api
+    ports:
+      - "8000:8080"
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      SAM_SERVICE_URL: http://sam-inference:8001
+      MASKFLOW_STORAGE: /data/storage
+      MASKFLOW_STATE: /data/maskflow-state.json
+      MASKFLOW_MINIO_ENDPOINT: http://minio:9000
+      MASKFLOW_MINIO_ACCESS_KEY: minioadmin
+      MASKFLOW_MINIO_SECRET_KEY: minioadmin
+      MASKFLOW_MINIO_BUCKET: maskflow
+    volumes:
+      - maskflow-api-data:/data
+    depends_on:
+      - sam-inference
+      - minio
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./src/frontend/maskflow-web
+      dockerfile: Dockerfile
+    image: maskflow-web-vue:latest
+    container_name: maskflow-web
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  maskflow-api-data:
+  minio-data:

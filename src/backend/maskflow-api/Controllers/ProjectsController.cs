@@ -1,0 +1,67 @@
+using Microsoft.AspNetCore.Mvc;
+
+[Route("api/projects")]
+[Tags("Projects")]
+public sealed class ProjectsController : MaskFlowControllerBase
+{
+    readonly ProjectService projectService;
+
+    public ProjectsController(MaskFlowStore store, ProjectService projectService) : base(store)
+    {
+        this.projectService = projectService;
+    }
+
+    [HttpPost]
+    public async Task<IActionResult> Create([FromBody] ProjectCreate request)
+    {
+        var user = CurrentUser();
+        var project = await projectService.CreateAsync(user.Id, request);
+        return Ok(new { project });
+    }
+
+    [HttpGet]
+    public IActionResult List()
+    {
+        var user = CurrentUser();
+        return Ok(new { projects = projectService.List(user.Id) });
+    }
+
+    [HttpGet("{projectId}")]
+    public IActionResult Detail(string projectId)
+    {
+        var user = CurrentUser();
+        var project = projectService.Detail(user.Id, projectId);
+        return project is null ? NotFound(new { detail = "Project not found." }) : Ok(new { project });
+    }
+
+    [HttpPut("{projectId}")]
+    public async Task<IActionResult> Update(string projectId, [FromBody] ProjectCreate request)
+    {
+        var user = CurrentUser();
+        var project = await projectService.UpdateAsync(user.Id, projectId, request);
+        return project is null ? NotFound(new { detail = "Project not found." }) : Ok(new { project });
+    }
+
+    [HttpDelete("{projectId}")]
+    public async Task<IActionResult> Delete(string projectId)
+    {
+        var user = CurrentUser();
+        var deleted = await projectService.DeleteAsync(user.Id, projectId);
+        return deleted ? Ok(new { ok = true, user = Store.PublicUser(Store.GetUser(user.Id)!) }) : NotFound(new { detail = "Project not found." });
+    }
+
+    [HttpGet("{projectId}/labels")]
+    public IActionResult Labels(string projectId)
+    {
+        var user = CurrentUser();
+        return Ok(new { labels = projectService.GetLabels(user.Id, projectId) });
+    }
+
+    [HttpPut("{projectId}/labels")]
+    public async Task<IActionResult> SaveLabels(string projectId, [FromBody] ProjectLabelsRequest request)
+    {
+        var user = CurrentUser();
+        var labels = await projectService.SaveLabelsAsync(user.Id, projectId, request.Labels);
+        return Ok(new { labels });
+    }
+}

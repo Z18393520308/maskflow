@@ -1,0 +1,17 @@
+{
+  "name": "maskflow-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "^6.0.7",
+    "vite": "^7.2.6",
+    "vue": "^3.5.25"
+  },
+  "devDependencies": {}
+}

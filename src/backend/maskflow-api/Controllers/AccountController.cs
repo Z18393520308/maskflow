@@ -1,0 +1,132 @@
+using System.Security.Cryptography;
+using Microsoft.AspNetCore.Mvc;
+
+[Tags("Account")]
+public sealed class AccountController : MaskFlowControllerBase
+{
+    public AccountController(MaskFlowStore store) : base(store) { }
+
+    [HttpGet("/api/me")]
+    public IActionResult Me()
+    {
+        var user = CurrentUser();
+        return Ok(new { user = Store.PublicUser(user) });
+    }
+
+    [HttpGet("/api/account/profile")]
+    public IActionResult Profile()
+    {
+        var user = CurrentUser();
+        return Ok(new { user = Store.PublicUser(user) });
+    }
+
+    [HttpPut("/api/account/profile")]
+    public async Task<IActionResult> UpdateProfile([FromBody] ProfileRequest request)
+    {
+        var user = CurrentUser();
+        await Store.UpdateProfileAsync(user.Id, request);
+        return Ok(new { user = Store.PublicUser(Store.GetUser(user.Id)!) });
+    }
+
+    [HttpPost("/api/account/password")]
+    public async Task<IActionResult> ChangePassword([FromBody] PasswordChangeRequest request)
+    {
+        var user = CurrentUser();
+        var changed = await Store.ChangePasswordAsync(user.Id, request.CurrentPassword, request.NewPassword);
+        return changed ? Ok(new { ok = true }) : BadRequest(new { detail = "Current password is incorrect." });
+    }
+
+    [HttpGet("/api/account/notifications")]
+    public IActionResult Notifications()
+    {
+        var user = CurrentUser();
+        return Ok(new { settings = Store.State.NotificationSettings.GetValueOrDefault(user.Id.ToString(), NotificationSettings.Default()) });
+    }
+
+    [HttpPut("/api/account/notifications")]
+    public async Task<IActionResult> UpdateNotifications([FromBody] NotificationSettings request)
+    {
+        var user = CurrentUser();
+        Store.State.NotificationSettings[user.Id.ToString()] = request with { UpdatedAt = DateTimeOffset.UtcNow };
+        await Store.SaveAsync();
+        return Ok(new { settings = Store.State.NotificationSettings[user.Id.ToString()] });
+    }
+
+    [HttpGet("/api/account/api-tokens")]
+    public IActionResult ApiTokens()
+    {
+        var user = CurrentUser();
+        return Ok(new { tokens = Store.State.ApiTokens.Where(x => x.UserId == user.Id && x.RevokedAt is null) });
+    }
+
+    [HttpPost("/api/account/api-tokens")]
+    public async Task<IActionResult> CreateApiToken([FromBody] ApiTokenCreate request)
+    {
+        var user = CurrentUser();
+        var plain = "mf_" + Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
+        var token = new ApiToken("tok_" + Util.Id(), user.Id, request.Name, Util.Sha256(plain), plain[..8], DateTimeOffset.UtcNow, null, null);
+        Store.State.ApiTokens.Add(token);
+        await Store.SaveAsync();
+        return Ok(new { token = token with { TokenHash = "" }, value = plain });
+    }
+
+    [HttpDelete("/api/account/api-tokens/{tokenId}")]
+    public async Task<IActionResult> RevokeApiToken(string tokenId)
+    {
+        var user = CurrentUser();
+        var token = Store.State.ApiTokens.FirstOrDefault(x => x.Id == tokenId && x.UserId == user.Id);
+        if (token is null) return NotFound(new { detail = "Token not found." });
+        Store.State.ApiTokens.Remove(token);
+        Store.State.ApiTokens.Add(token with { RevokedAt = DateTimeOffset.UtcNow });
+        await Store.SaveAsync();
+        return Ok(new { ok = true });
+    }
+
+    [HttpGet("/api/account/team")]
+    public IActionResult Team()
+    {
+        var user = CurrentUser();
+        return Ok(new { members = Store.State.TeamMembers.Where(x => x.UserId == user.Id) });
+    }
+
+    [HttpPost("/api/account/team")]
+    public async Task<IActionResult> AddTeamMember([FromBody] TeamMemberCreate request)
+    {
+        var user = CurrentUser();
+        var member = new TeamMember("mem_" + Util.Id(), user.Id, request.Email, request.Role, "invited", DateTimeOffset.UtcNow);
+        Store.State.TeamMembers.Add(member);
+        await Store.SaveAsync();
+        return Ok(new { member });
+    }
+
+    [HttpDelete("/api/account/team/{memberId}")]
+    public async Task<IActionResult> RemoveTeamMember(string memberId)
+    {
+        var user = CurrentUser();
+        var member = Store.State.TeamMembers.FirstOrDefault(x => x.Id == memberId && x.UserId == user.Id);
+        if (member is null) return NotFound(new { detail = "Team member not found." });
+        if (member.Role == "owner") return BadRequest(new { detail = "Owner cannot be removed." });
+        Store.State.TeamMembers.Remove(member);
+        await Store.SaveAsync();
+        return Ok(new { ok = true });
+    }
+
+    [HttpGet("/api/account/devices")]
+    public IActionResult Devices()
+    {
+        var user = CurrentUser();
+        return Ok(new { devices = Store.State.Devices.Where(x => x.UserId == user.Id) });
+    }
+
+    [HttpPost("/api/account/devices/{deviceId}/revoke")]
+    public async Task<IActionResult> RevokeDevice(string deviceId)
+    {
+        var user = CurrentUser();
+        var device = Store.State.Devices.FirstOrDefault(x => x.Id == deviceId && x.UserId == user.Id);
+        if (device is null) return NotFound(new { detail = "Device not found." });
+        Store.State.Devices.Remove(device);
+        Store.State.Devices.Add(device with { RevokedAt = DateTimeOffset.UtcNow });
+        await Store.SaveAsync();
+        return Ok(new { device = Store.State.Devices.First(x => x.Id == deviceId) });
+    }
+}
