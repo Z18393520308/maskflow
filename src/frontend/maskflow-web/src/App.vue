@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, provide, reactive, ref } from "vue";
-import { apiFetch, authHeaders, clearSession, formatBytes, saveSession, session, user as currentUser } from "./lib/api";
+import { apiFetch, authHeaders, clearSession, downloadAuthenticated, formatBytes, saveSession, session, user as currentUser } from "./lib/api";
 import HomePage from "./components/pages/HomePage.vue";
 import AuthPage from "./components/pages/AuthPage.vue";
 import AnnotatePage from "./components/pages/AnnotatePage.vue";
@@ -31,6 +31,12 @@ const dashboard = reactive({ projects: [], tasks: [], quota: null });
 const files = reactive({ rows: [], selected: null });
 const records = reactive({ rows: [] });
 const projects = reactive({ rows: [], selectedId: "", newName: "", status: "" });
+const exportPage = reactive({
+  tab: "config",
+  split: { train: 70, val: 20, test: 10 },
+  status: "",
+  rows: []
+});
 const selectedProject = computed(() => projects.rows.find((item) => item.id === projects.selectedId) || null);
 const segment = reactive({ file: null, preview: "", prompt: "", conf: 0.25, overlay: "", overlays: {}, activeOverlay: "all", categories: [], status: "准备就绪", warning: "", mode: "", count: 0 });
 const annotate = reactive({
@@ -200,13 +206,24 @@ async function createProject() {
   await refreshFiles();
 }
 
+function syncExportSplitFromProject() {
+  const split = selectedProject.value?.split;
+  if (split) {
+    exportPage.split.train = split.train;
+    exportPage.split.val = split.val;
+    exportPage.split.test = split.test;
+  }
+}
+
 async function selectProject(projectId) {
   if (projectId !== projects.selectedId && !canLeaveCurrentAnnotation()) return;
   projects.selectedId = projectId;
+  syncExportSplitFromProject();
   clearAnnotation();
   annotate.current = null;
   await loadProjectLabels();
   await refreshFiles();
+  if (page.value === "export") await refreshExports();
 }
 
 async function deleteCurrentProject() {
@@ -252,21 +269,178 @@ async function refreshRecords() {
   records.rows = data.tasks || [];
 }
 
+const uploadQueue = reactive({
+  active: false,
+  total: 0,
+  done: 0,
+  failed: 0,
+  skipped: 0,
+  percent: 0,
+  currentName: "",
+  items: []
+});
+
+const uploadDuplicatePrompt = reactive({
+  visible: false,
+  duplicateNames: [],
+  newCount: 0,
+  resolve: null
+});
+
+function normalizeFileName(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
+function getDuplicateUploadNames(fileList) {
+  const existing = new Set(files.rows.map((file) => normalizeFileName(file.name)));
+  return [...new Set(Array.from(fileList).filter((file) => existing.has(normalizeFileName(file.name))).map((file) => file.name))];
+}
+
+function openDuplicateUploadPrompt(duplicateNames, newCount) {
+  return new Promise((resolve) => {
+    uploadDuplicatePrompt.visible = true;
+    uploadDuplicatePrompt.duplicateNames = duplicateNames;
+    uploadDuplicatePrompt.newCount = newCount;
+    uploadDuplicatePrompt.resolve = resolve;
+  });
+}
+
+function resolveDuplicateUpload(action) {
+  const resolve = uploadDuplicatePrompt.resolve;
+  uploadDuplicatePrompt.visible = false;
+  uploadDuplicatePrompt.resolve = null;
+  uploadDuplicatePrompt.duplicateNames = [];
+  uploadDuplicatePrompt.newCount = 0;
+  resolve?.(action);
+}
+
+async function beginSequentialUpload(fileList, projectId) {
+  await refreshFiles();
+  const items = Array.from(fileList);
+  const duplicateNames = getDuplicateUploadNames(items);
+  let skipNames = new Set();
+
+  if (duplicateNames.length) {
+    const duplicateSet = new Set(duplicateNames.map(normalizeFileName));
+    const newCount = items.filter((file) => !duplicateSet.has(normalizeFileName(file.name))).length;
+    const action = await openDuplicateUploadPrompt(duplicateNames, newCount);
+    if (action === "cancel") return { cancelled: true, uploaded: [] };
+    if (action === "skip") skipNames = duplicateSet;
+  }
+
+  const uploaded = await uploadFilesSequentially(items, projectId, { skipNames });
+  return { cancelled: false, uploaded };
+}
+
+function resetUploadQueue(fileList) {
+  const items = Array.from(fileList);
+  uploadQueue.active = true;
+  uploadQueue.total = items.length;
+  uploadQueue.done = 0;
+  uploadQueue.failed = 0;
+  uploadQueue.skipped = 0;
+  uploadQueue.percent = 0;
+  uploadQueue.currentName = "";
+  uploadQueue.items = items.map((file, index) => ({
+    id: `${Date.now()}-${index}`,
+    name: file.name,
+    size: file.size,
+    status: "pending",
+    error: ""
+  }));
+}
+
+function refreshUploadProgress() {
+  uploadQueue.percent = uploadQueue.total
+    ? Math.round(((uploadQueue.done + uploadQueue.failed + uploadQueue.skipped) / uploadQueue.total) * 100)
+    : 0;
+}
+
+function uploadQueueStatusLabel(item) {
+  if (item.status === "pending") return "等待";
+  if (item.status === "uploading") return "上传中";
+  if (item.status === "done") return "完成";
+  if (item.status === "skipped") return "已跳过";
+  return "失败";
+}
+
+function buildUploadSummary(uploaded, total) {
+  const parts = [`成功 ${uploaded.length} 张`];
+  if (uploadQueue.skipped) parts.push(`跳过 ${uploadQueue.skipped} 张`);
+  if (uploadQueue.failed) parts.push(`失败 ${uploadQueue.failed} 张`);
+  return `上传完成：${parts.join("，")}（共 ${total} 张）`;
+}
+
+async function uploadSingleFile(file, projectId) {
+  const form = new FormData();
+  form.append("projectId", projectId);
+  form.append("files", file);
+  return apiFetch("/api/files/upload", { method: "POST", body: form });
+}
+
+async function uploadFilesSequentially(fileList, projectId, options = {}) {
+  const skipNames = options.skipNames || new Set();
+  resetUploadQueue(fileList);
+  const items = Array.from(fileList);
+  const uploaded = [];
+  for (let index = 0; index < items.length; index += 1) {
+    const file = items[index];
+    const queueItem = uploadQueue.items[index];
+    if (skipNames.has(normalizeFileName(file.name))) {
+      queueItem.status = "skipped";
+      queueItem.error = "服务器已存在同名文件";
+      uploadQueue.skipped += 1;
+      refreshUploadProgress();
+      continue;
+    }
+    queueItem.status = "uploading";
+    uploadQueue.currentName = file.name;
+    try {
+      const data = await uploadSingleFile(file, projectId);
+      if (data.user) {
+        account.value = data.user;
+        saveSession({ ...session(), user: data.user });
+      }
+      const saved = data.files?.[0];
+      if (saved) uploaded.push(saved);
+      queueItem.status = "done";
+      uploadQueue.done += 1;
+    } catch (error) {
+      queueItem.status = "failed";
+      queueItem.error = error.message;
+      uploadQueue.failed += 1;
+    }
+    refreshUploadProgress();
+  }
+  uploadQueue.active = false;
+  uploadQueue.currentName = "";
+  return uploaded;
+}
+
 async function uploadFiles() {
   if (!files.selected?.length) return;
   if (!projects.selectedId) {
     projects.status = "请先选择或创建项目";
     return;
   }
-  const form = new FormData();
-  form.append("projectId", projects.selectedId);
-  Array.from(files.selected).forEach((file) => form.append("files", file));
-  const data = await apiFetch("/api/files/upload", { method: "POST", body: form });
-  if (data.user) {
-    account.value = data.user;
-    saveSession({ ...session(), user: data.user });
+  loading.value = true;
+  projects.status = "正在上传图片";
+  try {
+    const total = files.selected.length;
+    const result = await beginSequentialUpload(files.selected, projects.selectedId);
+    if (result.cancelled) {
+      projects.status = "已取消上传";
+      return;
+    }
+    projects.status = uploadQueue.skipped || uploadQueue.failed
+      ? buildUploadSummary(result.uploaded, total)
+      : `已上传 ${result.uploaded.length} / ${total} 张图片`;
+    await refreshFiles();
+  } catch (error) {
+    projects.status = error.message;
+  } finally {
+    loading.value = false;
   }
-  await refreshFiles();
 }
 
 async function deleteFile(fileId) {
@@ -475,18 +649,18 @@ async function uploadAnnotateFiles() {
   loading.value = true;
   annotate.status = "正在上传图片";
   try {
-    const form = new FormData();
-    form.append("projectId", projects.selectedId);
-    Array.from(annotate.selected).forEach((file) => form.append("files", file));
-    const data = await apiFetch("/api/files/upload", { method: "POST", body: form });
-    if (data.user) {
-      account.value = data.user;
-      saveSession({ ...session(), user: data.user });
+    const total = annotate.selected.length;
+    const result = await beginSequentialUpload(annotate.selected, projects.selectedId);
+    if (result.cancelled) {
+      annotate.status = "已取消上传";
+      return;
     }
     await refreshFiles();
-    const first = data.files?.[0];
+    const first = result.uploaded[0];
     if (first) await selectAnnotateFile(first);
-    annotate.status = `已上传 ${data.files?.length || 0} 张图片，未自动标注`;
+    annotate.status = uploadQueue.skipped || uploadQueue.failed
+      ? `${buildUploadSummary(result.uploaded, total)}，未自动标注`
+      : `已上传 ${result.uploaded.length} / ${total} 张图片，未自动标注`;
   } catch (error) {
     annotate.status = error.message;
   } finally {
@@ -765,16 +939,75 @@ function previewUrl(file) {
   return file?.id === annotate.current?.id ? annotate.preview : "";
 }
 
+function exportSplitTotal() {
+  return Number(exportPage.split.train || 0) + Number(exportPage.split.val || 0) + Number(exportPage.split.test || 0);
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  return new Date(value).toLocaleString();
+}
+
+async function refreshExports() {
+  if (!account.value) return;
+  const query = projects.selectedId ? `?projectId=${encodeURIComponent(projects.selectedId)}` : "";
+  const data = await apiFetch(`/api/export${query}`).catch(() => ({ exports: [] }));
+  exportPage.rows = data.exports || [];
+}
+
+async function downloadExportItem(item) {
+  if (!item?.downloadUrl) return;
+  loading.value = true;
+  exportPage.status = "正在下载导出文件...";
+  try {
+    await downloadAuthenticated(item.downloadUrl, `${item.id}.zip`);
+    exportPage.status = "下载已开始";
+  } catch (error) {
+    exportPage.status = error.message;
+  } finally {
+    loading.value = false;
+  }
+}
+
 async function createExport() {
   if (!projects.selectedId) {
-    message.value = "请先选择项目";
+    exportPage.status = "请先选择项目";
     return;
   }
-  const data = await apiFetch("/api/export/dataset", {
-    method: "POST",
-    body: { projectId: projects.selectedId, format: "yolo", split: { train: 70, val: 20, test: 10 } }
-  });
-  location.href = data.export.downloadUrl;
+  if (exportSplitTotal() !== 100) {
+    exportPage.status = "train / val / test 比例之和必须为 100";
+    return;
+  }
+  loading.value = true;
+  exportPage.status = "正在生成数据集 ZIP，请稍候...";
+  if (page.value === "annotate") annotate.status = exportPage.status;
+  try {
+    const data = await apiFetch("/api/export/dataset", {
+      method: "POST",
+      body: {
+        projectId: projects.selectedId,
+        format: "yolo",
+        split: {
+          train: Number(exportPage.split.train),
+          val: Number(exportPage.split.val),
+          test: Number(exportPage.split.test)
+        }
+      }
+    });
+    await downloadAuthenticated(data.export.downloadUrl, `${data.export.id}.zip`);
+    exportPage.status = `导出成功，文件大小 ${formatBytes(data.export.size)}`;
+    if (page.value === "annotate") annotate.status = exportPage.status;
+    exportPage.tab = "history";
+    await refreshExports();
+  } catch (error) {
+    const message = error.message.includes("No annotated images")
+      ? "当前项目没有已标注图片，请先完成标注并保存后再导出"
+      : error.message;
+    exportPage.status = message;
+    if (page.value === "annotate") annotate.status = message;
+  } finally {
+    loading.value = false;
+  }
 }
 
 async function subscribe(plan) {
@@ -877,6 +1110,10 @@ function refreshPage() {
     refreshProjects().then(refreshFiles);
   }
   if (page.value === "records") refreshRecords();
+  if (page.value === "export") {
+    syncExportSplitFromProject();
+    refreshExports();
+  }
   if (page.value === "settings" && account.value) loadAccountSettings();
 }
 
@@ -887,6 +1124,8 @@ provide("homeFeatures", homeFeatures);
 provide("heroPreviewRoad", heroPreviewRoad);
 provide("message", message);
 provide("loading", loading);
+provide("uploadQueue", uploadQueue);
+provide("uploadQueueStatusLabel", uploadQueueStatusLabel);
 provide("submitAuth", submitAuth);
 provide("annotate", annotate);
 provide("projects", projects);
@@ -928,6 +1167,10 @@ provide("selectProject", selectProject);
 provide("createProject", createProject);
 provide("deleteFile", deleteFile);
 provide("createExport", createExport);
+provide("exportPage", exportPage);
+provide("exportSplitTotal", exportSplitTotal);
+provide("downloadExportItem", downloadExportItem);
+provide("formatDateTime", formatDateTime);
 provide("needsLogin", needsLogin);
 
 onMounted(() => {
@@ -943,6 +1186,21 @@ onMounted(() => {
 </script>
 
 <template>
+  <div v-if="uploadDuplicatePrompt.visible" class="upload-duplicate-mask" @click.self="resolveDuplicateUpload('cancel')">
+    <section class="upload-duplicate-dialog" role="dialog" aria-modal="true" aria-labelledby="upload-duplicate-title">
+      <h3 id="upload-duplicate-title">发现重复文件</h3>
+      <p>当前项目已有 {{ uploadDuplicatePrompt.duplicateNames.length }} 个同名文件。你可以选择跳过重复项，或继续上传全部文件。</p>
+      <ul class="upload-duplicate-list">
+        <li v-for="name in uploadDuplicatePrompt.duplicateNames" :key="name">{{ name }}</li>
+      </ul>
+      <div class="upload-duplicate-actions">
+        <button class="btn" type="button" :disabled="uploadDuplicatePrompt.newCount === 0" @click="resolveDuplicateUpload('skip')">跳过重复，上传其余 {{ uploadDuplicatePrompt.newCount }} 个</button>
+        <button class="btn secondary" type="button" @click="resolveDuplicateUpload('all')">仍然上传全部</button>
+        <button class="btn ghost" type="button" @click="resolveDuplicateUpload('cancel')">取消上传</button>
+      </div>
+    </section>
+  </div>
+
   <header v-if="page === 'home' || page === 'auth'" class="marketing-nav">
     <a class="marketing-brand" href="#" @click.prevent="go('/index.html')"><span class="logo-mark">M</span><strong>MaskFlow</strong></a>
     <nav class="marketing-links">
@@ -1081,6 +1339,22 @@ onMounted(() => {
           <input type="file" multiple accept="image/*" @change="files.selected = $event.target.files" />
           <p>{{ files.selected?.length ? '已选择 ' + files.selected.length + ' 个文件' : '支持批量选择图片文件。' }}</p>
           <button class="btn" :disabled="loading || !files.selected?.length || !projects.selectedId" @click="uploadFiles">上传到当前项目</button>
+          <div v-if="uploadQueue.items.length" class="upload-queue-panel compact">
+            <div class="upload-queue-head">
+              <strong>上传进度</strong>
+              <span>{{ uploadQueue.done + uploadQueue.failed + uploadQueue.skipped }} / {{ uploadQueue.total }}</span>
+            </div>
+            <div class="progress upload-progress">
+              <i :style="{ width: uploadQueue.percent + '%' }"></i>
+            </div>
+            <p v-if="uploadQueue.currentName" class="upload-current">正在上传：{{ uploadQueue.currentName }}</p>
+            <ul class="upload-queue-list">
+              <li v-for="item in uploadQueue.items" :key="item.id" :class="['upload-queue-item', item.status]">
+                <span class="upload-queue-name">{{ item.name }}</span>
+                <em>{{ uploadQueueStatusLabel(item) }}</em>
+              </li>
+            </ul>
+          </div>
           <p v-if="projects.status">{{ projects.status }}</p>
           <p v-if="account">空间：{{ formatBytes(account.usedBytes) }} / {{ formatBytes(account.quotaBytes) }}</p>
         </article>
@@ -1134,7 +1408,10 @@ onMounted(() => {
         <div class="work-title-icon">E</div>
         <div><h1>数据集导出</h1><p>按 YOLO 目录结构生成训练集、验证集、测试集和配置文件。</p></div>
       </header>
-      <nav class="billing-proto-tabs work-tabs"><a class="active">导出配置</a><a>历史记录</a></nav>
+      <nav class="billing-proto-tabs work-tabs">
+        <a href="#" :class="{ active: exportPage.tab === 'config' }" @click.prevent="exportPage.tab = 'config'">导出配置</a>
+        <a href="#" :class="{ active: exportPage.tab === 'history' }" @click.prevent="exportPage.tab = 'history'">历史记录</a>
+      </nav>
       <section class="project-bar">
         <div><strong>导出项目</strong><p>{{ selectedProject?.name || '请先选择项目' }}</p></div>
         <select v-model="projects.selectedId" @change="selectProject(projects.selectedId)">
@@ -1142,13 +1419,22 @@ onMounted(() => {
           <option v-for="project in projects.rows" :key="project.id" :value="project.id">{{ project.name }} · {{ project.imageCount || 0 }} 张 · {{ project.annotationCount || 0 }} 条标注</option>
         </select>
       </section>
-      <section class="work-bottom">
+
+      <section v-if="exportPage.tab === 'config'" class="work-bottom export-config-grid">
         <article class="work-card">
           <h2>导出配置</h2>
           <p>项目：{{ selectedProject?.name || '-' }}</p>
-          <p>train 70% / val 20% / test 10%</p>
-          <p>格式：YOLO txt</p>
-          <button class="btn" :disabled="!projects.selectedId" @click="createExport">导出当前项目 ZIP</button>
+          <p>格式：YOLO txt（仅包含已标注图片）</p>
+          <div class="export-split-form">
+            <label>训练集 train %<input v-model.number="exportPage.split.train" type="number" min="0" max="100" /></label>
+            <label>验证集 val %<input v-model.number="exportPage.split.val" type="number" min="0" max="100" /></label>
+            <label>测试集 test %<input v-model.number="exportPage.split.test" type="number" min="0" max="100" /></label>
+          </div>
+          <p :class="['export-split-total', { invalid: exportSplitTotal() !== 100 }]">当前合计：{{ exportSplitTotal() }}%（需等于 100%）</p>
+          <button class="btn" :disabled="loading || !projects.selectedId || exportSplitTotal() !== 100" @click="createExport">
+            {{ loading ? '正在导出...' : '导出当前项目 ZIP' }}
+          </button>
+          <p v-if="exportPage.status" class="export-status">{{ exportPage.status }}</p>
         </article>
         <article class="work-card wide">
           <h2>目录预览</h2>
@@ -1161,6 +1447,37 @@ onMounted(() => {
   labels/test
   data.yaml</pre>
         </article>
+      </section>
+
+      <section v-else class="work-card export-history-card">
+        <div class="section-head">
+          <h2>导出历史</h2>
+          <button class="btn secondary compact-btn" type="button" :disabled="loading" @click="refreshExports">刷新</button>
+        </div>
+        <p v-if="exportPage.status" class="export-status">{{ exportPage.status }}</p>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>导出 ID</th>
+              <th>项目</th>
+              <th>划分</th>
+              <th>大小</th>
+              <th>时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in exportPage.rows" :key="item.id">
+              <td>{{ item.id }}</td>
+              <td>{{ item.projectName || item.projectId || '-' }}</td>
+              <td>{{ item.split ? `train ${item.split.train}% / val ${item.split.val}% / test ${item.split.test}%` : '-' }}</td>
+              <td>{{ formatBytes(item.size) }}</td>
+              <td>{{ formatDateTime(item.finishedAt || item.createdAt) }}</td>
+              <td><button class="btn secondary compact-btn" type="button" :disabled="loading || item.status !== 'completed'" @click="downloadExportItem(item)">下载</button></td>
+            </tr>
+            <tr v-if="!exportPage.rows.length"><td colspan="6">当前项目还没有导出记录。</td></tr>
+          </tbody>
+        </table>
       </section>
     </section>
   </main>

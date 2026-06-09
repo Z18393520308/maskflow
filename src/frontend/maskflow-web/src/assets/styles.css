@@ -5360,6 +5360,222 @@ body:has(.app-sidebar) {
   box-shadow: 0 10px 26px rgba(20, 36, 70, 0.04);
 }
 
+.upload-queue-panel {
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border: 1px solid #dfe7f3;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.04);
+}
+
+.upload-queue-panel.compact {
+  margin-top: 14px;
+  margin-bottom: 0;
+}
+
+.upload-queue-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.upload-queue-head strong,
+.upload-queue-head span {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.upload-progress {
+  margin-bottom: 10px;
+}
+
+.upload-current {
+  margin: 0 0 10px;
+  color: #475467;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.upload-queue-list {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.upload-queue-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 13px;
+}
+
+.upload-queue-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-queue-item em {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.upload-queue-item.uploading {
+  background: #eef4ff;
+}
+
+.upload-queue-item.uploading em {
+  color: #1f63ff;
+}
+
+.upload-queue-item.done em {
+  color: #15803d;
+}
+
+.upload-queue-item.failed {
+  background: #fff1f2;
+}
+
+.upload-queue-item.failed em {
+  color: #b91c1c;
+}
+
+.upload-queue-item.skipped {
+  background: #fff7ed;
+}
+
+.upload-queue-item.skipped em {
+  color: #c2410c;
+}
+
+.upload-duplicate-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.upload-duplicate-dialog {
+  width: min(560px, 100%);
+  max-height: min(80vh, 720px);
+  display: grid;
+  gap: 14px;
+  padding: 22px;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.2);
+}
+
+.upload-duplicate-dialog h3,
+.upload-duplicate-dialog p {
+  margin: 0;
+}
+
+.upload-duplicate-dialog h3 {
+  color: #0f172a;
+  font-size: 20px;
+}
+
+.upload-duplicate-dialog p {
+  color: #475467;
+  line-height: 1.6;
+}
+
+.upload-duplicate-list {
+  max-height: 220px;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  list-style: none;
+}
+
+.upload-duplicate-list li {
+  padding: 4px 0;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-duplicate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.export-config-grid {
+  align-items: start;
+}
+
+.export-split-form {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.export-split-form label {
+  display: grid;
+  gap: 6px;
+  color: #475467;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.export-split-form input {
+  min-height: 36px;
+  border: 1px solid #dfe7f3;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.export-split-total {
+  margin: 0 0 14px;
+  color: #15803d;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.export-split-total.invalid {
+  color: #b91c1c;
+}
+
+.export-status {
+  margin: 12px 0 0;
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.export-history-card {
+  margin-top: 0;
+}
+
 .upload-inline {
   position: relative;
   min-height: 38px;

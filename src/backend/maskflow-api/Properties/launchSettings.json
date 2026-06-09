@@ -7,7 +7,13 @@
       "launchBrowser": true,
       "applicationUrl": "http://localhost:5152",
       "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development"
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "MASKFLOW_MINIO_ENDPOINT": "http://127.0.0.1:9000",
+        "MASKFLOW_MINIO_ACCESS_KEY": "admin",
+        "MASKFLOW_MINIO_SECRET_KEY": "admin123456",
+        "MASKFLOW_MINIO_BUCKET": "maskflow",
+        "MASKFLOW_STORAGE": "data/storage",
+        "MASKFLOW_STATE": "data/maskflow-state.json"
       }
     },
     "https": {

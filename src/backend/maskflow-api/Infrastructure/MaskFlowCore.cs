@@ -369,6 +369,12 @@ public sealed class MaskFlowStore
 
     public async Task<DatasetExport> CreateDatasetExportAsync(int userId, ExportRequest request)
     {
+        var split = request.Split ?? new SplitConfig(70, 20, 10);
+        if (split.Train + split.Val + split.Test != 100)
+        {
+            throw new BadHttpRequestException("Split ratios must sum to 100.", 400);
+        }
+
         var exportId = "export_" + Util.Id();
         var exportDir = Path.Combine(StorageRoot, userId.ToString(), "exports");
         Directory.CreateDirectory(exportDir);
@@ -380,10 +386,13 @@ public sealed class MaskFlowStore
         var fileIds = files.Select(x => x.Id).ToHashSet();
         var annotationMap = State.AnnotationSets.Where(x => x.UserId == userId && fileIds.Contains(x.FileId)).ToDictionary(x => x.FileId);
         var labeledFiles = files.Where(x => annotationMap.ContainsKey(x.Id)).ToList();
+        if (labeledFiles.Count == 0)
+        {
+            throw new BadHttpRequestException("No annotated images found for export.", 400);
+        }
 
         using (var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
         {
-            var split = request.Split ?? new SplitConfig(70, 20, 10);
             var labels = request.ProjectId is not null && State.ProjectLabels.TryGetValue(request.ProjectId, out var projectLabels)
                 ? projectLabels.ToList()
                 : annotationMap.Values
@@ -434,7 +443,7 @@ public sealed class MaskFlowStore
             readmeWriter.WriteLine($"Images: {labeledFiles.Count}");
             readmeWriter.WriteLine($"GeneratedAt: {DateTimeOffset.UtcNow:O}");
         }
-        var fileInfo = new FileInfo(zipPath);
+        var zipSize = new FileInfo(zipPath).Length;
         var exportPath = zipPath;
         if (UseMinio)
         {
@@ -453,7 +462,7 @@ public sealed class MaskFlowStore
             exportPath = $"minio://{MinioBucket}/{exportKey}";
             File.Delete(zipPath);
         }
-        var export = new DatasetExport(exportId, userId, request.ProjectId, request.TaskId, "completed", exportPath, fileInfo.Length, request, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, $"/api/export/{exportId}/download");
+        var export = new DatasetExport(exportId, userId, request.ProjectId, request.TaskId, "completed", exportPath, zipSize, request, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, $"/api/export/{exportId}/download");
         State.Exports.Add(export);
         await SaveAsync();
         return export;

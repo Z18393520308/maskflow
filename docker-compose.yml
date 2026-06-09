@@ -31,8 +31,8 @@ services:
       - "9000:9000"
       - "9001:9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: admin123456
     volumes:
       - minio-data:/data
     restart: unless-stopped
@@ -51,8 +51,8 @@ services:
       MASKFLOW_STORAGE: /data/storage
       MASKFLOW_STATE: /data/maskflow-state.json
       MASKFLOW_MINIO_ENDPOINT: http://minio:9000
-      MASKFLOW_MINIO_ACCESS_KEY: minioadmin
-      MASKFLOW_MINIO_SECRET_KEY: minioadmin
+      MASKFLOW_MINIO_ACCESS_KEY: admin
+      MASKFLOW_MINIO_SECRET_KEY: admin123456
       MASKFLOW_MINIO_BUCKET: maskflow
     volumes:
       - maskflow-api-data:/data

@@ -5,6 +5,11 @@ using MaskFlow.Api.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.Limits.MaxRequestBodySize = 512L * 1024L * 1024L;
+});
+
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy => policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod());
@@ -20,7 +25,9 @@ builder.Services.AddHttpClient("sam", client =>
 
 builder.Services.Configure<FormOptions>(options =>
 {
-    options.MultipartBodyLengthLimit = 1024L * 1024L * 1024L;
+    options.MultipartBodyLengthLimit = 512L * 1024L * 1024L;
+    options.ValueCountLimit = 4096;
+    options.MultipartHeadersCountLimit = 64;
 });
 
 builder.Services.AddMaskFlowApplication();

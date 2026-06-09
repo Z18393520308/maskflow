@@ -69,13 +69,18 @@ Docker Compose 会通过 volume 挂载该路径。若缺失，分割相关功能
 ### 1. 启动业务 API
 
 ```powershell
-# 本地开发建议禁用 MinIO（未启动 MinIO 时）
-$env:MASKFLOW_MINIO_ENDPOINT = " "
+# 已启动 MinIO 时，使用对象存储保存上传文件
+$env:MASKFLOW_MINIO_ENDPOINT = "http://127.0.0.1:9000"
+$env:MASKFLOW_MINIO_ACCESS_KEY = "admin"
+$env:MASKFLOW_MINIO_SECRET_KEY = "admin123456"
+$env:MASKFLOW_MINIO_BUCKET = "maskflow"
 $env:MASKFLOW_STORAGE = "src\backend\maskflow-api\data\storage"
 $env:MASKFLOW_STATE = "src\backend\maskflow-api\data\maskflow-state.json"
 
 dotnet run --project src\backend\maskflow-api\MaskFlow.Api.csproj --urls http://127.0.0.1:8010
 ```
+
+未启动 MinIO 时，可将 `MASKFLOW_MINIO_ENDPOINT` 设为空格 `" "` 以回退到本地磁盘存储。
 
 Swagger：http://127.0.0.1:8010/swagger
 

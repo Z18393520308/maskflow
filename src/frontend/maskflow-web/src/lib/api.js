@@ -33,11 +33,44 @@ export async function apiFetch(path, options = {}) {
   }
   const response = await fetch(path, { ...options, headers });
   const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      if (!response.ok) {
+        throw new Error(text.split("\n")[0].slice(0, 200) || "请求失败");
+      }
+    }
+  }
   if (!response.ok) {
-    throw new Error(data.detail || data.title || "请求失败");
+    throw new Error(data.detail || data.title || text.split("\n")[0] || "请求失败");
   }
   return data;
+}
+
+export async function downloadAuthenticated(path, filename = "download") {
+  const response = await fetch(path, { headers: authHeaders() });
+  if (!response.ok) {
+    const text = await response.text();
+    let message = "下载失败";
+    try {
+      const data = JSON.parse(text);
+      message = data.detail || data.title || message;
+    } catch {
+      if (text) message = text;
+    }
+    throw new Error(message);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 export function formatBytes(bytes = 0) {
