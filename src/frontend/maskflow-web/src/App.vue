@@ -37,7 +37,6 @@ const annotate = reactive({
   selected: null,
   fileId: null,
   current: null,
-  tab: "workspace",
   preview: "",
   frame: { width: 0, height: 0 },
   annotations: [],
@@ -47,7 +46,11 @@ const annotate = reactive({
   conf: 0.25,
   labels: ["object"],
   newLabel: "",
-  status: "请选择或上传图片"
+  status: "请选择或上传图片",
+  dirty: false,
+  savedAt: null,
+  zoom: 1,
+  filter: "all"
 });
 const settings = reactive({
   active: "profile",
@@ -198,6 +201,7 @@ async function createProject() {
 }
 
 async function selectProject(projectId) {
+  if (projectId !== projects.selectedId && !canLeaveCurrentAnnotation()) return;
   projects.selectedId = projectId;
   clearAnnotation();
   annotate.current = null;
@@ -343,7 +347,7 @@ function applyAnnotation(annotation) {
   annotate.annotations = (annotation.annotations || []).map((item) => ({ ...item }));
   annotate.activeId = annotate.annotations[0]?.id || "";
   normalizeAnnotationLabels();
-  annotate.status = annotate.annotations.length ? `已加载 ${annotate.annotations.length} 条标注` : "暂无标注";
+  markAnnotationSaved(annotate.annotations.length ? `已加载 ${annotate.annotations.length} 条标注` : "暂无标注");
 }
 
 function clearAnnotation() {
@@ -351,6 +355,7 @@ function clearAnnotation() {
   annotate.activeId = "";
   annotate.width = 0;
   annotate.height = 0;
+  annotate.dirty = false;
 }
 
 function persistBatchLabels() {
@@ -375,6 +380,7 @@ function normalizeAnnotationLabels(items = annotate.annotations) {
 
 function syncAnnotationLabels() {
   normalizeAnnotationLabels();
+  markAnnotationDirty("标签已更新，记得保存");
 }
 
 function syncBatchLabelsFromAnnotations() {
@@ -419,7 +425,7 @@ function applyLabelToActive(label) {
   }
   active.label = label;
   normalizeAnnotationLabels();
-  annotate.status = `已将选中目标设置为 ${label}`;
+  markAnnotationDirty(`已将选中目标设置为 ${label}`);
 }
 
 async function replaceLabelInBatch(fromLabel, toLabel) {
@@ -501,10 +507,47 @@ async function loadAnnotatePreview(file) {
   await nextTick();
 }
 
+const filteredFiles = computed(() => {
+  if (annotate.filter === "annotated") return files.rows.filter((file) => file.annotated);
+  if (annotate.filter === "unannotated") return files.rows.filter((file) => !file.annotated);
+  return files.rows;
+});
+const currentFileIndex = computed(() => files.rows.findIndex((file) => file.id === annotate.current?.id));
+const activeAnnotation = computed(() => annotate.annotations.find((item) => item.id === annotate.activeId) || null);
+const annotationStats = computed(() => {
+  const total = annotate.annotations.length;
+  const confirmed = annotate.annotations.filter((item) => item.confirmed).length;
+  return { total, confirmed, pending: Math.max(0, total - confirmed) };
+});
+const saveStateText = computed(() => {
+  if (annotate.dirty) return "有未保存修改";
+  if (annotate.savedAt) return `已保存 ${new Date(annotate.savedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  return "等待标注";
+});
+
+function markAnnotationDirty(status = "有未保存修改") {
+  annotate.dirty = true;
+  annotate.status = status;
+}
+
+function markAnnotationSaved(status = "标注已保存") {
+  annotate.dirty = false;
+  annotate.savedAt = Date.now();
+  annotate.status = status;
+}
+
+function canLeaveCurrentAnnotation() {
+  return !annotate.dirty || window.confirm("当前图片有未保存修改，离开后将丢失这些改动。是否继续？");
+}
+
 async function selectAnnotateFile(file) {
+  if (file?.id !== annotate.current?.id && !canLeaveCurrentAnnotation()) return;
   annotate.current = file;
   annotate.fileId = file?.id || null;
   clearAnnotation();
+  annotate.dirty = false;
+  annotate.savedAt = null;
+  annotate.zoom = 1;
   if (!file) {
     annotate.status = "请选择或上传图片";
     return;
@@ -524,6 +567,8 @@ async function selectAnnotateFile(file) {
     } catch {
       clearAnnotation();
     }
+  } else {
+    markAnnotationSaved("图片已选择，等待自动标注");
   }
 }
 
@@ -598,30 +643,40 @@ async function runMasks() {
 
 async function saveAnnotation() {
   if (!annotate.current?.id) return;
+  loading.value = true;
   normalizeAnnotationLabels();
-  const data = await apiFetch(`/api/annotations/file/${annotate.current.id}`, {
-    method: "PUT",
-    body: {
-      fileId: annotate.current.id,
-      width: annotate.width,
-      height: annotate.height,
-      annotations: annotate.annotations
-    }
-  });
-  applyAnnotation(data.annotation);
-  await refreshFiles();
-  annotate.status = "标注已保存";
+  try {
+    const data = await apiFetch(`/api/annotations/file/${annotate.current.id}`, {
+      method: "PUT",
+      body: {
+        fileId: annotate.current.id,
+        width: annotate.width,
+        height: annotate.height,
+        annotations: annotate.annotations
+      }
+    });
+    applyAnnotation(data.annotation);
+    await refreshFiles();
+    markAnnotationSaved("标注已保存");
+  } catch (error) {
+    annotate.status = error.message;
+  } finally {
+    loading.value = false;
+  }
 }
 
 function toggleAnnotationConfirmed(annotationId) {
   const item = annotate.annotations.find((a) => a.id === annotationId);
-  if (item) item.confirmed = !item.confirmed;
+  if (item) {
+    item.confirmed = !item.confirmed;
+    markAnnotationDirty(item.confirmed ? "目标已确认，记得保存" : "目标已取消确认，记得保存");
+  }
 }
 
-async function removeAnnotation(annotationId) {
+function removeAnnotation(annotationId) {
   annotate.annotations = annotate.annotations.filter((item) => item.id !== annotationId);
   annotate.activeId = annotate.annotations[0]?.id || "";
-  await saveAnnotation();
+  markAnnotationDirty("目标已删除，记得保存");
 }
 
 function yoloTxt() {
@@ -654,27 +709,49 @@ function annotationBoxStyle(item) {
 }
 
 const yoloFrameStyle = computed(() => ({
-  width: annotate.frame.width ? `${annotate.frame.width}px` : "auto",
-  height: annotate.frame.height ? `${annotate.frame.height}px` : "auto"
+  width: annotate.frame.width ? `${annotate.frame.width * annotate.zoom}px` : "auto",
+  height: annotate.frame.height ? `${annotate.frame.height * annotate.zoom}px` : "auto"
 }));
 
 function updateYoloFrame(event) {
-  const image = event?.target || document.querySelector(".yolo-image-frame img");
+  const image = event?.target || document.querySelector(".annotate-canvas-panel .yolo-image-frame img");
   const canvas = image?.closest?.(".yolo-canvas");
   if (!image || !canvas || !image.naturalWidth || !image.naturalHeight) return;
-  const canvasBox = canvas.getBoundingClientRect();
+  const canvasStyle = getComputedStyle(canvas);
+  const paddingX = parseFloat(canvasStyle.paddingLeft) + parseFloat(canvasStyle.paddingRight);
+  const paddingY = parseFloat(canvasStyle.paddingTop) + parseFloat(canvasStyle.paddingBottom);
+  const viewportWidth = Math.max(1, canvas.clientWidth - paddingX);
+  const viewportHeight = Math.max(1, canvas.clientHeight - paddingY);
   const imageRatio = image.naturalWidth / image.naturalHeight;
-  const canvasRatio = canvasBox.width / canvasBox.height;
+  const viewportRatio = viewportWidth / viewportHeight;
   let width;
   let height;
-  if (canvasRatio > imageRatio) {
-    height = canvasBox.height;
+  if (viewportRatio > imageRatio) {
+    height = viewportHeight;
     width = height * imageRatio;
   } else {
-    width = canvasBox.width;
+    width = viewportWidth;
     height = width / imageRatio;
   }
   annotate.frame = { width: Math.max(1, width), height: Math.max(1, height) };
+}
+
+function setYoloZoom(value) {
+  annotate.zoom = Math.max(0.25, Math.min(3, Number(value) || 1));
+  if (annotate.zoom === 1) nextTick(updateYoloFrame);
+}
+
+function resetYoloZoom() {
+  annotate.zoom = 1;
+  nextTick(updateYoloFrame);
+}
+
+async function selectAdjacentFile(direction) {
+  if (!files.rows.length) return;
+  const index = currentFileIndex.value;
+  const nextIndex = Math.max(0, Math.min(files.rows.length - 1, (index < 0 ? 0 : index) + direction));
+  const nextFile = files.rows[nextIndex];
+  if (nextFile && nextFile.id !== annotate.current?.id) await selectAnnotateFile(nextFile);
 }
 
 function segmentPoints(item) {
@@ -815,6 +892,7 @@ provide("annotate", annotate);
 provide("projects", projects);
 provide("selectedProject", selectedProject);
 provide("files", files);
+provide("filteredFiles", filteredFiles);
 provide("account", account);
 provide("formatBytes", formatBytes);
 provide("saveSession", saveSession);
@@ -826,11 +904,18 @@ provide("runMasks", runMasks);
 provide("saveAnnotation", saveAnnotation);
 provide("removeAnnotation", removeAnnotation);
 provide("toggleAnnotationConfirmed", toggleAnnotationConfirmed);
+provide("activeAnnotation", activeAnnotation);
+provide("annotationStats", annotationStats);
+provide("currentFileIndex", currentFileIndex);
+provide("saveStateText", saveStateText);
 provide("yoloTxt", yoloTxt);
 provide("annotationBoxStyle", annotationBoxStyle);
 provide("segmentPoints", segmentPoints);
 provide("yoloFrameStyle", yoloFrameStyle);
 provide("updateYoloFrame", updateYoloFrame);
+provide("setYoloZoom", setYoloZoom);
+provide("resetYoloZoom", resetYoloZoom);
+provide("selectAdjacentFile", selectAdjacentFile);
 provide("addAnnotateLabel", addAnnotateLabel);
 provide("deleteAnnotateLabel", deleteAnnotateLabel);
 provide("applyLabelToActive", applyLabelToActive);
@@ -893,14 +978,14 @@ onMounted(() => {
   <aside v-if="!['home', 'auth'].includes(page)" class="app-sidebar">
     <a class="app-sidebar-brand" href="#" @click.prevent="go('/dashboard.html')"><span class="logo-mark">M</span><strong>MaskFlow</strong></a>
     <nav>
-      <a :class="{ active: page === 'dashboard' }" href="#" @click.prevent="go('/dashboard.html')"><span>📊</span>控制台</a>
-      <a :class="{ active: page === 'files' }" href="#" @click.prevent="go('/files.html')"><span>📤</span>上传图片</a>
-      <a :class="{ active: page === 'segment' }" href="#" @click.prevent="go('/segment.html')"><span>✂️</span>SAM 分割</a>
-      <a :class="{ active: page === 'annotate' }" href="#" @click.prevent="go('/annotate.html')"><span>🏷️</span>YOLO 标注</a>
-      <a :class="{ active: page === 'export' }" href="#" @click.prevent="go('/export.html')"><span>📦</span>数据集导出</a>
-      <a :class="{ active: page === 'records' }" href="#" @click.prevent="go('/records.html')"><span>📋</span>处理记录</a>
-      <a :class="{ active: page === 'billing' }" href="#" @click.prevent="go('/billing.html')"><span>💳</span>账单套餐</a>
-      <a :class="{ active: page === 'settings' }" href="#" @click.prevent="go('/settings.html')"><span>⚙️</span>账户设置</a>
+      <a :class="{ active: page === 'dashboard' }" href="#" @click.prevent="go('/dashboard.html')"><span>D</span>控制台</a>
+      <a :class="{ active: page === 'files' }" href="#" @click.prevent="go('/files.html')"><span>U</span>上传图片</a>
+      <a :class="{ active: page === 'segment' }" href="#" @click.prevent="go('/segment.html')"><span>S</span>SAM 分割</a>
+      <a :class="{ active: page === 'annotate' }" href="#" @click.prevent="go('/annotate.html')"><span>A</span>YOLO 标注</a>
+      <a :class="{ active: page === 'export' }" href="#" @click.prevent="go('/export.html')"><span>E</span>数据集导出</a>
+      <a :class="{ active: page === 'records' }" href="#" @click.prevent="go('/records.html')"><span>R</span>处理记录</a>
+      <a :class="{ active: page === 'billing' }" href="#" @click.prevent="go('/billing.html')"><span>B</span>账单套餐</a>
+      <a :class="{ active: page === 'settings' }" href="#" @click.prevent="go('/settings.html')"><span>C</span>账户设置</a>
     </nav>
     <div class="app-sidebar-account">
       <span class="avatar">M</span>
@@ -960,7 +1045,7 @@ onMounted(() => {
           <h2>分割结果</h2>
           <p v-if="segment.mode">模式：{{ segment.mode === 'text' ? '文本提示' : '自动识别' }}</p>
           <p v-if="segment.count">目标数量：{{ segment.count }}</p>
-          <p v-if="segment.warning" class="segment-warning">自动分类暂不可用，已先返回分割结果。可输入 person, car 等提示词获得类别结果。</p>
+          <p v-if="segment.warning" class="segment-warning">自动分类暂不可用，已先返回分割结果。可输入 person、car 等提示词获得类别结果。</p>
           <div class="overlay-list">
             <button v-if="segment.overlays.all" :class="['overlay-row', { active: segment.activeOverlay === 'all' }]" type="button" @click="showSegmentOverlay('all')"><span>全部目标</span><b>{{ segment.count }}</b></button>
             <button v-for="cat in segment.categories" :key="cat.id" :class="['overlay-row', { active: segment.activeOverlay === cat.id }]" type="button" @click="showSegmentOverlay(cat.id)"><span>{{ cat.label }}</span><b>{{ cat.count }}</b></button>
@@ -1047,7 +1132,7 @@ onMounted(() => {
     <section class="work-wrap">
       <header class="work-title">
         <div class="work-title-icon">E</div>
-        <div><h1>数据集导出</h1><p>按 YOLO 目录结构生成训练集、验证集和配置文件。</p></div>
+        <div><h1>数据集导出</h1><p>按 YOLO 目录结构生成训练集、验证集、测试集和配置文件。</p></div>
       </header>
       <nav class="billing-proto-tabs work-tabs"><a class="active">导出配置</a><a>历史记录</a></nav>
       <section class="project-bar">
@@ -1139,7 +1224,7 @@ onMounted(() => {
       <section v-if="settings.active === 'tokens'" class="account-settings-card">
         <div class="settings-card-title"><h2>API Token</h2><p>用于通过接口上传图片、创建任务和导出数据集。</p></div>
         <div class="settings-inline-form">
-          <input v-model="settings.tokenName" placeholder="Token 名称，例如本地脚本" />
+          <input v-model="settings.tokenName" placeholder="Token 名称，例如 本地脚本" />
           <button class="btn" type="button" @click="createApiToken">创建 Token</button>
         </div>
         <div v-if="settings.tokenValue" class="token-secret"><span>新 Token</span><code>{{ settings.tokenValue }}</code></div>
