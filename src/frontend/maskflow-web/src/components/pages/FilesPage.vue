@@ -31,6 +31,10 @@ const deleteFile = inject("deleteFile");
           <option v-for="project in projects.rows" :key="project.id" :value="project.id">{{ project.name }} · {{ project.imageCount || 0 }} 张</option>
         </select>
         <input v-model="projects.newName" placeholder="新项目名称，例如 药瓶分类" @keyup.enter="createProject" />
+        <select v-model="projects.newDataType" class="project-type-select" title="新建项目的任务类型">
+          <option value="detection">目标检测</option>
+          <option value="segmentation">实例分割</option>
+        </select>
         <button class="btn compact-btn" type="button" @click="createProject">新增项目</button>
         <button class="btn secondary compact-btn" type="button" :disabled="!projects.selectedId" @click="deleteCurrentProject">删除项目</button>
       </section>

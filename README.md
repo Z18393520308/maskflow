@@ -130,28 +130,43 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8001
 
 本地开发若设置了 `SAM3_INTERNAL_KEY`，请在启动 API 时使用相同值；若启用 `SAM3_REQUIRE_INTERNAL_KEY=true`，则 SAM 服务必须配置该密钥。
 
-## Docker 部署
+## Docker 部署（统一 sam3 项目）
 
-复制环境变量模板并修改所有密钥（至少 16 字符，勿使用 `maskflow-*-dev-key` 默认值）：
+所有服务由根目录 `docker-compose.yml` 管理，项目名为 **sam3**：
+
+```text
+sam-inference / mysql / minio / api / web
+```
+
+复制环境变量模板并按本机路径修改：
 
 ```powershell
 copy .env.example .env
-# 编辑 .env 中的 SAM3_INTERNAL_KEY、MASKFLOW_ADMIN_API_KEY、MYSQL_*、MINIO_* 等
+# 必填：MINIO_DATA_PATH、MYSQL_DATA_VOLUME、MYSQL_*、MINIO_*
+# 全新安装 MySQL 前先创建数据卷：docker volume create maskflow-mysql-data
 ```
 
 确保 `资源/模型/sam3.pt` 已下载，然后在项目根目录执行：
 
 ```powershell
+# 启动全部服务
 docker compose up -d --build
+
+# 仅重建并更新前端 / 后端（MySQL、SAM、MinIO 不动）
+docker compose up -d --build api web
+
+# 查看状态 / 日志
+docker compose ps
+docker compose logs -f api
 ```
 
-| 服务 | 地址 |
-|------|------|
-| Web | http://localhost:3000 |
-| API | http://localhost:8000 |
-| MySQL | localhost:3306 |
-| SAM | http://localhost:8001 |
-| MinIO Console | http://localhost:9001 |
+| 服务 | 容器名 | 默认地址 |
+|------|--------|----------|
+| Web | maskflow-frontend | http://localhost:3000 |
+| API | maskflow-api | http://localhost:8000 |
+| MySQL | maskflow-mysql | localhost:3307 |
+| SAM | maskflow-sam-inference | http://localhost:8001 |
+| MinIO Console | maskflow-minio | http://localhost:9001 |
 
 ## 主要 API
 

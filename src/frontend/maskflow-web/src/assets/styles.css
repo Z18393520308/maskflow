@@ -4113,7 +4113,7 @@ body:has(.app-sidebar) {
 
 .project-bar {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(180px, 260px) minmax(220px, 300px) auto auto;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 260px) minmax(220px, 300px) minmax(140px, 180px) auto auto;
   gap: 10px;
   align-items: center;
   margin-bottom: 16px;
@@ -4143,6 +4143,29 @@ body:has(.app-sidebar) {
   border-radius: 7px;
   background: #fff;
   padding: 0 10px;
+}
+
+.project-task-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.project-type-select {
+  min-width: 132px;
+}
+
+.export-format-hint {
+  margin: 0 0 10px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .text-danger {
@@ -5377,7 +5400,7 @@ body:has(.app-sidebar) {
 }
 
 .annotate-project-bar {
-  grid-template-columns: minmax(220px, 1fr) minmax(190px, 270px) minmax(220px, 320px) auto;
+  grid-template-columns: minmax(220px, 1fr) minmax(190px, 270px) minmax(220px, 320px) minmax(140px, 180px) auto;
 }
 
 .annotate-topbar {

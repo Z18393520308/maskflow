@@ -8,6 +8,12 @@ import {
   buildLabelSwatchStyle,
   getLabelColor
 } from "../lib/labelColors";
+import {
+  buildYoloTxt as formatYoloTxt,
+  normalizeProjectDataType,
+  projectDataTypeLabel,
+  projectYoloExportHint
+} from "../lib/yoloFormat";
 import heroPreviewRoad from "../assets/hero-preview-road.png";
 
 export function useMaskFlowApp() {
@@ -35,7 +41,7 @@ export function useMaskFlowApp() {
   const dashboard = reactive({ projects: [], tasks: [], quota: null });
   const files = reactive({ rows: [], selected: null });
   const records = reactive({ rows: [] });
-  const projects = reactive({ rows: [], selectedId: "", newName: "", status: "" });
+  const projects = reactive({ rows: [], selectedId: "", newName: "", newDataType: "detection", status: "" });
   const exportPage = reactive({
     tab: "config",
     split: { train: 70, val: 20, test: 10 },
@@ -43,6 +49,9 @@ export function useMaskFlowApp() {
     rows: []
   });
   const selectedProject = computed(() => projects.rows.find((item) => item.id === projects.selectedId) || null);
+  const selectedProjectDataType = computed(() => normalizeProjectDataType(selectedProject.value?.dataType));
+  const selectedProjectDataTypeLabel = computed(() => projectDataTypeLabel(selectedProject.value?.dataType));
+  const selectedProjectExportHint = computed(() => projectYoloExportHint(selectedProject.value?.dataType));
   const segment = reactive({ file: null, preview: "", prompt: "", conf: 0.25, overlay: "", overlays: {}, activeOverlay: "all", categories: [], status: "准备就绪", warning: "", mode: "", count: 0 });
   const annotate = reactive({
     selected: null,
@@ -211,7 +220,12 @@ export function useMaskFlowApp() {
     }
     const data = await apiFetch("/api/projects", {
       method: "POST",
-      body: { name, description: "", dataType: "detection", split: { train: 70, val: 20, test: 10 } }
+      body: {
+        name,
+        description: "",
+        dataType: normalizeProjectDataType(projects.newDataType),
+        split: { train: 70, val: 20, test: 10 }
+      }
     });
     projects.newName = "";
     projects.selectedId = data.project.id;
@@ -1002,14 +1016,7 @@ export function useMaskFlowApp() {
 
   function yoloTxt() {
     normalizeAnnotationLabels();
-    return annotate.annotations
-      .filter(isExportableAnnotation)
-      .map((item) => {
-        if (item.segment?.length >= 6) return `${item.classId} ${item.segment.map((v) => Number(v).toFixed(6)).join(" ")}`;
-        const box = item.bbox || { cx: 0.5, cy: 0.5, width: 0.2, height: 0.2 };
-        return `${item.classId} ${Number(box.cx).toFixed(6)} ${Number(box.cy).toFixed(6)} ${Number(box.width).toFixed(6)} ${Number(box.height).toFixed(6)}`;
-      })
-      .join("\n");
+    return formatYoloTxt(annotate.annotations, selectedProject.value?.dataType, isExportableAnnotation);
   }
 
   function downloadCurrentTxt() {
@@ -1313,7 +1320,7 @@ export function useMaskFlowApp() {
 
   const providers = {
     page, auth, go, logout, homeFeatures, heroPreviewRoad, message, loading, uploadQueue, uploadQueueStatusLabel,
-    submitAuth, annotate, projects, selectedProject, files, filteredFiles, account, formatBytes, dashboard, records,
+    submitAuth, annotate, projects, selectedProject, selectedProjectDataType, selectedProjectDataTypeLabel, selectedProjectExportHint, files, filteredFiles, account, formatBytes, dashboard, records,
     segment, settings, settingsTabs, billingPlans, billingExplain, billingFaqs, exportPage,
     saveSession, session, authHeaders, selectAnnotateFile, runCurrentMask, runMasks, saveAnnotation,
     removeAnnotation, toggleAnnotationConfirmed, activeAnnotation, annotationStats, currentFileIndex,
@@ -1349,6 +1356,9 @@ export function useMaskFlowApp() {
     projects,
     exportPage,
     selectedProject,
+    selectedProjectDataType,
+    selectedProjectDataTypeLabel,
+    selectedProjectExportHint,
     segment,
     annotate,
     settings,

@@ -11,12 +11,22 @@
       </header>
 
       <section class="project-bar annotate-project-bar">
-        <div><strong>当前项目</strong><p>{{ selectedProject?.name || '请先选择或创建项目' }}</p></div>
+        <div>
+          <strong>当前项目</strong>
+          <p>
+            {{ selectedProject?.name || '请先选择或创建项目' }}
+            <span v-if="selectedProject" class="project-task-badge">{{ selectedProjectDataTypeLabel }}</span>
+          </p>
+        </div>
         <select :value="projects.selectedId" @change="selectProject($event.target.value)">
           <option value="">选择项目</option>
           <option v-for="project in projects.rows" :key="project.id" :value="project.id">{{ project.name }} · {{ project.imageCount || 0 }} 张</option>
         </select>
         <input v-model="projects.newName" placeholder="新项目名称，例如 道路场景" @keyup.enter="createProject" />
+        <select v-model="projects.newDataType" class="project-type-select" title="新建项目的任务类型">
+          <option value="detection">目标检测</option>
+          <option value="segmentation">实例分割</option>
+        </select>
         <button class="btn compact-btn" type="button" @click="createProject">新建项目</button>
       </section>
 
@@ -187,6 +197,7 @@
               · {{ activeAnnotation.confirmed ? '人工已确认' : '待人确认' }}
             </p>
             <p v-else>选择一个标注目标后显示属性。</p>
+            <p v-if="selectedProject" class="export-format-hint">保存/导出格式：{{ selectedProjectExportHint }}</p>
             <button class="btn secondary" type="button" :disabled="!annotate.annotations.some((item) => item.label)" @click="downloadCurrentTxt">导出当前 TXT</button>
           </div>
         </aside>
@@ -201,6 +212,8 @@ import { inject } from "vue";
 const annotate = inject("annotate");
 const projects = inject("projects");
 const selectedProject = inject("selectedProject");
+const selectedProjectDataTypeLabel = inject("selectedProjectDataTypeLabel");
+const selectedProjectExportHint = inject("selectedProjectExportHint");
 const files = inject("files");
 const filteredFiles = inject("filteredFiles");
 const loading = inject("loading");

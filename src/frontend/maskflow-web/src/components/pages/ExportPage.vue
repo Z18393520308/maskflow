@@ -3,6 +3,8 @@ import { inject } from "vue";
 
 const projects = inject("projects");
 const selectedProject = inject("selectedProject");
+const selectedProjectDataTypeLabel = inject("selectedProjectDataTypeLabel");
+const selectedProjectExportHint = inject("selectedProjectExportHint");
 const exportPage = inject("exportPage");
 const loading = inject("loading");
 const formatBytes = inject("formatBytes");
@@ -37,7 +39,8 @@ const refreshExports = inject("refreshExports");
         <article class="work-card">
           <h2>导出配置</h2>
           <p>项目：{{ selectedProject?.name || '-' }}</p>
-          <p>格式：YOLO txt（仅包含已标注图片）</p>
+          <p>任务类型：{{ selectedProject ? selectedProjectDataTypeLabel : '-' }}</p>
+          <p>导出格式：{{ selectedProject ? selectedProjectExportHint : 'YOLO txt' }}（仅包含已标注图片）</p>
           <div class="export-split-form">
             <label>训练集 train %<input v-model.number="exportPage.split.train" type="number" min="0" max="100" /></label>
             <label>验证集 val %<input v-model.number="exportPage.split.val" type="number" min="0" max="100" /></label>

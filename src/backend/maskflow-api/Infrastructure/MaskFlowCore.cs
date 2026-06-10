@@ -390,7 +390,7 @@ public sealed class MaskFlowStore
         Project? project = null;
         await SaveAsync(() =>
         {
-            project = new Project("proj_" + Util.Id(), userId, request.Name, request.Description ?? "", request.DataType ?? "detection",
+            project = new Project("proj_" + Util.Id(), userId, request.Name, request.Description ?? "", NormalizeDataType(request.DataType),
                 request.Split ?? new SplitConfig(70, 20, 10), 0, 0, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
             State.Projects.Add(project);
             State.ProjectLabels[project.Id] = [];
@@ -415,7 +415,7 @@ public sealed class MaskFlowStore
             {
                 Name = request.Name,
                 Description = request.Description ?? project.Description,
-                DataType = request.DataType ?? project.DataType,
+                DataType = request.DataType is null ? project.DataType : NormalizeDataType(request.DataType),
                 Split = request.Split ?? project.Split,
                 UpdatedAt = DateTimeOffset.UtcNow
             };
@@ -488,6 +488,7 @@ public sealed class MaskFlowStore
         if (file is null) throw new BadHttpRequestException("File not found.", 404);
 
         var projectLabels = file.ProjectId is not null ? GetProjectLabels(userId, file.ProjectId) : null;
+        var dataType = ResolveProjectDataType(userId, file.ProjectId);
         var annotations = NormalizeAnnotations(request.Annotations, projectLabels);
         var existing = State.AnnotationSets.FirstOrDefault(x => x.FileId == request.FileId && x.UserId == userId);
         if (existing is not null)
@@ -503,7 +504,7 @@ public sealed class MaskFlowStore
             request.Width,
             request.Height,
             annotations,
-            BuildYoloTxt(annotations),
+            BuildYoloTxt(annotations, dataType),
             existing?.CreatedAt ?? now,
             now);
         State.AnnotationSets.Add(set);
@@ -603,7 +604,7 @@ public sealed class MaskFlowStore
                 State.AnnotationSets.Add(set with
                 {
                     Annotations = normalized,
-                    YoloTxt = BuildYoloTxt(normalized),
+                    YoloTxt = BuildYoloTxt(normalized, ResolveProjectDataType(userId, projectId)),
                     UpdatedAt = DateTimeOffset.UtcNow
                 });
             }
@@ -807,17 +808,36 @@ public sealed class MaskFlowStore
         return normalized;
     }
 
-    public static string BuildYoloTxt(IEnumerable<AnnotationItem> annotations) =>
-        string.Join("\n", annotations.Where(IsExportableAnnotation).Select(annotation =>
-        {
-            if (annotation.Segment is { Count: >= 6 })
-            {
-                return $"{annotation.ClassId} {string.Join(" ", annotation.Segment.Select(FormatYolo))}";
-            }
+    public static string NormalizeDataType(string? dataType) =>
+        string.Equals(dataType, "segmentation", StringComparison.OrdinalIgnoreCase) ? "segmentation" : "detection";
 
-            var box = annotation.Bbox;
-            return $"{annotation.ClassId} {FormatYolo(box.Cx)} {FormatYolo(box.Cy)} {FormatYolo(box.Width)} {FormatYolo(box.Height)}";
-        }));
+    public static string ResolveYoloTask(string? dataType) =>
+        NormalizeDataType(dataType) == "segmentation" ? "segment" : "detect";
+
+    string ResolveProjectDataType(int userId, string? projectId)
+    {
+        if (projectId is null)
+        {
+            return "detection";
+        }
+
+        var project = State.Projects.FirstOrDefault(x => x.Id == projectId && x.UserId == userId);
+        return NormalizeDataType(project?.DataType);
+    }
+
+    public static string BuildYoloLine(AnnotationItem annotation, string? dataType)
+    {
+        if (NormalizeDataType(dataType) == "segmentation" && annotation.Segment is { Count: >= 6 })
+        {
+            return $"{annotation.ClassId} {string.Join(" ", annotation.Segment.Select(FormatYolo))}";
+        }
+
+        var box = annotation.Bbox;
+        return $"{annotation.ClassId} {FormatYolo(box.Cx)} {FormatYolo(box.Cy)} {FormatYolo(box.Width)} {FormatYolo(box.Height)}";
+    }
+
+    public static string BuildYoloTxt(IEnumerable<AnnotationItem> annotations, string? dataType = "detection") =>
+        string.Join("\n", annotations.Where(IsExportableAnnotation).Select(annotation => BuildYoloLine(annotation, dataType)));
 
     public async Task<DatasetExport> CreateDatasetExportAsync(int userId, ExportRequest request)
     {
@@ -845,6 +865,9 @@ public sealed class MaskFlowStore
             {
                 throw new BadHttpRequestException("No annotated images found for export.", 400);
             }
+
+            var projectDataType = ResolveProjectDataType(userId, request.ProjectId);
+            var yoloTask = ResolveYoloTask(projectDataType);
 
             using (var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
             {
@@ -887,13 +910,14 @@ public sealed class MaskFlowStore
 
                     var labelEntry = archive.CreateEntry($"labels/{targetSplit}/{stem}.txt");
                     using var labelWriter = new StreamWriter(labelEntry.Open());
-                    labelWriter.Write(annotationMap[file.Id].YoloTxt);
+                    labelWriter.Write(BuildYoloTxt(annotationMap[file.Id].Annotations, projectDataType));
                 }
 
                 var dataEntry = archive.CreateEntry("data.yaml");
                 using (var writer = new StreamWriter(dataEntry.Open()))
                 {
                     writer.WriteLine("path: .");
+                    writer.WriteLine($"task: {yoloTask}");
                     writer.WriteLine("train: images/train");
                     writer.WriteLine("val: images/val");
                     writer.WriteLine("test: images/test");
@@ -909,6 +933,8 @@ public sealed class MaskFlowStore
                 using var readmeWriter = new StreamWriter(readme.Open());
                 readmeWriter.WriteLine("# MaskFlow YOLO Dataset");
                 readmeWriter.WriteLine();
+                readmeWriter.WriteLine($"Task: {yoloTask}");
+                readmeWriter.WriteLine($"DataType: {projectDataType}");
                 readmeWriter.WriteLine($"Images: {labeledFiles.Count}");
                 readmeWriter.WriteLine($"GeneratedAt: {DateTimeOffset.UtcNow:O}");
             }
