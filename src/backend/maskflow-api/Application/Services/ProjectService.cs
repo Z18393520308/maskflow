@@ -39,6 +39,9 @@ public sealed class ProjectService
     public Task<List<string>> SaveLabelsAsync(int userId, string projectId, IEnumerable<string>? labels) =>
         store.SaveProjectLabelsAsync(userId, projectId, labels);
 
+    public Task<List<string>> DeleteLabelAsync(int userId, string projectId, string labelName, string? replaceWith) =>
+        store.DeleteProjectLabelAsync(userId, projectId, labelName, replaceWith);
+
     ProjectSummaryDto ToDto(int userId, Project project)
     {
         var projectFiles = store.State.Files.Where(x => x.UserId == userId && x.ProjectId == project.Id).ToList();

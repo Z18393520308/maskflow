@@ -4339,22 +4339,13 @@ body:has(.app-sidebar) {
 }
 
 .yolo-mask-layer polygon {
-  fill: rgba(37, 99, 235, 0.28);
-  stroke: rgba(37, 99, 235, 0.9);
-  stroke-width: 0.45;
-}
-
-.yolo-mask-layer polygon.active {
-  fill: rgba(22, 163, 74, 0.34);
-  stroke: #16a34a;
-  stroke-width: 0.7;
+  vector-effect: non-scaling-stroke;
 }
 
 .yolo-box {
   position: absolute;
   z-index: 3;
-  border: 2px solid #2563eb;
-  background: rgba(37, 99, 235, 0.08);
+  border-style: solid;
   color: #fff;
   font-size: 12px;
   font-weight: 700;
@@ -4362,11 +4353,25 @@ body:has(.app-sidebar) {
   padding: 2px 4px;
   cursor: pointer;
   pointer-events: auto;
+  transition: box-shadow 0.15s ease, border-width 0.15s ease;
 }
 
-.yolo-box.active {
-  border-color: #16a34a;
-  background: rgba(22, 163, 74, 0.14);
+.annotation-row.unassigned {
+  opacity: 0.92;
+}
+
+.annotate-label-hint {
+  margin: 0 0 12px;
+  color: #b45309;
+  font-size: 14px;
+}
+
+.annotate-default-label select {
+  min-width: 120px;
+}
+
+.label-delete-replace {
+  min-width: 96px;
 }
 
 .annotation-list {
@@ -4402,6 +4407,7 @@ body:has(.app-sidebar) {
   display: grid;
   gap: 6px;
   border: 1px solid #dbe5f5;
+  border-left-width: 4px;
   border-radius: 8px;
   padding: 10px;
   background: #fff;
@@ -4409,8 +4415,36 @@ body:has(.app-sidebar) {
 }
 
 .annotation-row.active {
-  border-color: #1b63ff;
-  background: #eef4ff;
+  background: #f8fafc;
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.06);
+}
+
+.annotation-inspector .annotation-row {
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+}
+
+.annotation-row-swatch {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+}
+
+.annotation-inspector .annotation-row .confirm-dot {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.annotation-inspector .annotation-row select {
+  grid-column: 3;
+}
+
+.annotation-inspector .annotation-row small {
+  grid-column: 3;
+}
+
+.annotation-inspector .annotation-row .btn {
+  grid-column: 3;
+  justify-self: end;
 }
 
 .annotation-row input,
@@ -5832,13 +5866,13 @@ body:has(.app-sidebar) {
 }
 
 .annotation-inspector .annotation-row {
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr);
   align-items: center;
 }
 
 .annotation-inspector .annotation-row small,
 .annotation-inspector .annotation-row .btn {
-  grid-column: 2;
+  grid-column: 3;
 }
 
 .annotation-inspector .annotation-row .compact-btn {
@@ -5882,6 +5916,9 @@ body:has(.app-sidebar) {
   font-size: 13px;
   font-weight: 900;
   text-align: left;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .label-manager-inline .label-delete-btn {
@@ -5889,9 +5926,8 @@ body:has(.app-sidebar) {
 }
 
 .label-chip:hover {
-  border-color: #0b58f4;
-  background: #eef4ff;
-  color: #0b58f4;
+  filter: brightness(0.97);
+  transform: translateY(-1px);
 }
 
 @media (max-width: 1280px) {

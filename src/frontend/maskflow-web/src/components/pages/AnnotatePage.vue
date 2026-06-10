@@ -26,11 +26,26 @@
           <span>上传图片</span>
         </label>
         <label class="inline-control">置信度 {{ annotate.conf }}<input v-model="annotate.conf" type="range" min="0.01" max="0.95" step="0.01" /></label>
-        <button class="btn" :disabled="loading || !annotate.current" @click="runCurrentMask">运行当前图片</button>
-        <button class="btn secondary" :disabled="loading || !files.rows.length" @click="runMasks">批量运行 AI</button>
+        <label class="inline-control annotate-default-label">
+          本次默认类别
+          <select v-model="annotate.defaultRunLabel" :disabled="!annotate.labels.length">
+            <option value="">未分配</option>
+            <option v-for="label in annotate.labels" :key="label" :value="label">{{ label }}</option>
+          </select>
+        </label>
+        <div v-if="annotate.labels.length" class="annotate-label-legend" aria-label="标签颜色图例">
+          <span v-for="label in annotate.labels" :key="label" class="annotate-legend-item">
+            <i class="label-color-swatch" :style="labelSwatchStyle(label)" />
+            {{ label }}
+          </span>
+        </div>
+        <button class="btn" :disabled="loading || !annotate.current || !canRunAnnotateAi" @click="runCurrentMask">运行当前图片</button>
+        <button class="btn secondary" :disabled="loading || !files.rows.length || !canRunAnnotateAi" @click="runMasks">批量运行 AI</button>
         <button class="btn secondary" :disabled="loading || !annotate.dirty" @click="saveAnnotation">保存</button>
-        <button class="btn ghost" :disabled="!projects.selectedId" @click="createExport">导出 ZIP</button>
+        <button class="btn ghost" :disabled="!projects.selectedId || !annotate.labels.length" @click="createExport">导出 ZIP</button>
       </section>
+
+      <p v-if="!annotate.labels.length" class="annotate-label-hint">请先添加至少一个项目标签，再运行 AI 自动标注。</p>
 
       <section class="annotate-workbench">
         <aside class="work-card image-queue-panel">
@@ -46,7 +61,7 @@
             <button v-for="file in filteredFiles" :key="file.id" :class="['file-row-btn', { active: annotate.current?.id === file.id }]" type="button" @click="selectAnnotateFile(file)">
               <span>{{ file.name }}</span>
               <small>{{ formatBytes(file.size) }} · {{ file.annotated ? file.annotationCount + ' 条标注' : '未标注' }}</small>
-              <b :class="['file-status-dot', { done: file.annotated }]"></b>
+              <b :class="['file-status-dot', { done: file.annotated }]" title="已执行自动标注"></b>
             </button>
             <div v-if="!filteredFiles.length" class="empty-note">当前筛选下没有图片。</div>
           </div>
@@ -63,10 +78,23 @@
             <div v-if="previewUrl(annotate.current)" class="yolo-image-frame" :style="yoloFrameStyle">
               <img :src="previewUrl(annotate.current)" alt="标注图片" @load="updateYoloFrame" />
               <svg class="yolo-mask-layer" viewBox="0 0 100 100" preserveAspectRatio="none">
-                <polygon v-for="item in annotate.annotations" :key="'poly-' + item.id" :points="segmentPoints(item)" :class="{ active: annotate.activeId === item.id }" />
+                <polygon
+                  v-for="item in annotate.annotations"
+                  :key="'poly-' + item.id"
+                  :points="segmentPoints(item)"
+                  :class="{ active: annotate.activeId === item.id, unassigned: !item.label }"
+                  :style="annotationPolygonStyle(item)"
+                />
               </svg>
-              <button v-for="item in annotate.annotations" :key="item.id" :class="['yolo-box', { active: annotate.activeId === item.id }]" :style="annotationBoxStyle(item)" type="button" @click="annotate.activeId = item.id">
-                {{ item.label }}
+              <button
+                v-for="item in annotate.annotations"
+                :key="item.id"
+                :class="['yolo-box', { active: annotate.activeId === item.id, unassigned: !item.label }]"
+                :style="annotationBoxStyle(item)"
+                type="button"
+                @click="annotate.activeId = item.id"
+              >
+                {{ formatAnnotationLabel(item.label) }}
               </button>
             </div>
             <div v-else class="empty-note">正在加载图片预览...</div>
@@ -86,16 +114,32 @@
 
         <aside class="work-card annotation-inspector">
           <div class="panel-head">
-            <div><h2>标注结果</h2><p>{{ annotationStats.confirmed }} 已确认 · {{ annotationStats.pending }} 待确认</p></div>
+            <div>
+              <h2>标注结果</h2>
+              <p>{{ annotationStats.confirmed }} 人工已确认 · {{ annotationStats.pending }} 待人确认 · {{ annotationStats.unassigned }} 未分配</p>
+            </div>
             <button class="btn compact-btn" type="button" :disabled="!annotate.annotations.length" @click="saveAnnotation">保存</button>
           </div>
           <div class="annotation-list">
-            <section v-for="item in annotate.annotations" :key="item.id" :class="['annotation-row', { active: annotate.activeId === item.id }]" @click="annotate.activeId = item.id">
-              <span class="confirm-dot" :class="{ unconfirmed: !item.confirmed }" @click.stop="toggleAnnotationConfirmed(item.id)" :title="item.confirmed ? '已确认' : '未确认，点击确认'"></span>
-              <select v-model="item.label" @click.stop @change="syncAnnotationLabels">
+            <section
+              v-for="item in annotate.annotations"
+              :key="item.id"
+              :class="['annotation-row', { active: annotate.activeId === item.id, unassigned: !item.label }]"
+              :style="annotationRowAccentStyle(item)"
+              @click="annotate.activeId = item.id"
+            >
+              <span class="label-color-swatch annotation-row-swatch" :style="labelSwatchStyle(item.label)" />
+              <span
+                class="confirm-dot"
+                :class="{ unconfirmed: !item.confirmed }"
+                @click.stop="toggleAnnotationConfirmed(item.id)"
+                :title="item.confirmed ? '人工已确认' : '待人确认：点击确认标签与 mask'"
+              ></span>
+              <select :value="item.label ?? ''" @click.stop @change="onAnnotationLabelChange(item, $event.target.value)">
+                <option value="">未分配</option>
                 <option v-for="label in annotate.labels" :key="label" :value="label">{{ label }}</option>
               </select>
-              <small>class {{ item.classId }} · conf {{ Number(item.confidence || 1).toFixed(2) }}</small>
+              <small>{{ item.label ? `class ${item.classId}` : '未分配' }} · conf {{ Number(item.confidence || 1).toFixed(2) }}</small>
               <button class="btn secondary compact-btn" type="button" @click.stop="removeAnnotation(item.id)">删除</button>
             </section>
             <div v-if="!annotate.annotations.length" class="empty-note">运行 AI 后会在这里显示标注结果。</div>
@@ -107,16 +151,29 @@
               <input v-model="annotate.newLabel" placeholder="新增标签，例如 person" @keyup.enter="addAnnotateLabel" />
               <button class="btn compact-btn" type="button" @click="addAnnotateLabel">新增</button>
             </div>
+            <div v-if="!annotate.labels.length" class="empty-note">添加标签后即可运行 AI 并分配类别。</div>
             <div class="label-chip-list">
               <div v-for="label in annotate.labels" :key="label" class="label-chip-row">
-                <button type="button" class="label-chip" @click="applyLabelToActive(label)">{{ label }}</button>
+                <button type="button" class="label-chip" :style="labelChipStyle(label)" @click="applyLabelToActive(label)">
+                  <i class="label-color-swatch" :style="labelSwatchStyle(label)" />
+                  {{ label }}
+                </button>
+                <template v-if="annotate.pendingDeleteLabel === label">
+                  <select v-model="annotate.labelDeleteReplace" class="label-delete-replace">
+                    <option value="">未分配</option>
+                    <option v-for="other in annotate.labels.filter((item) => item !== label)" :key="other" :value="other">{{ other }}</option>
+                  </select>
+                  <button class="btn compact-btn" type="button" :disabled="loading" @click="confirmDeleteAnnotateLabel">确认</button>
+                  <button class="btn secondary compact-btn" type="button" @click="cancelDeleteAnnotateLabel">取消</button>
+                </template>
                 <button
+                  v-else
                   class="label-delete-btn"
                   type="button"
-                  :disabled="label === 'object' || loading"
-                  @click="deleteAnnotateLabel(label)"
+                  :disabled="loading"
+                  @click="beginDeleteAnnotateLabel(label)"
                 >
-                  {{ label === 'object' ? '默认' : '删除' }}
+                  删除
                 </button>
               </div>
             </div>
@@ -124,9 +181,13 @@
 
           <div class="active-object-card">
             <h2>当前目标</h2>
-            <p v-if="activeAnnotation">{{ activeAnnotation.label }} · class {{ activeAnnotation.classId }} · {{ activeAnnotation.confirmed ? '已确认' : '待确认' }}</p>
+            <p v-if="activeAnnotation">
+              {{ formatAnnotationLabel(activeAnnotation.label) }}
+              · {{ activeAnnotation.label ? `class ${activeAnnotation.classId}` : '未分配' }}
+              · {{ activeAnnotation.confirmed ? '人工已确认' : '待人确认' }}
+            </p>
             <p v-else>选择一个标注目标后显示属性。</p>
-            <button class="btn secondary" type="button" :disabled="!annotate.annotations.length" @click="downloadCurrentTxt">导出当前 TXT</button>
+            <button class="btn secondary" type="button" :disabled="!annotate.annotations.some((item) => item.label)" @click="downloadCurrentTxt">导出当前 TXT</button>
           </div>
         </aside>
       </section>
@@ -142,7 +203,6 @@ const projects = inject("projects");
 const selectedProject = inject("selectedProject");
 const files = inject("files");
 const filteredFiles = inject("filteredFiles");
-const account = inject("account");
 const loading = inject("loading");
 const formatBytes = inject("formatBytes");
 const selectAnnotateFile = inject("selectAnnotateFile");
@@ -155,9 +215,11 @@ const segmentPoints = inject("segmentPoints");
 const yoloFrameStyle = inject("yoloFrameStyle");
 const updateYoloFrame = inject("updateYoloFrame");
 const addAnnotateLabel = inject("addAnnotateLabel");
-const deleteAnnotateLabel = inject("deleteAnnotateLabel");
+const beginDeleteAnnotateLabel = inject("beginDeleteAnnotateLabel");
+const confirmDeleteAnnotateLabel = inject("confirmDeleteAnnotateLabel");
+const cancelDeleteAnnotateLabel = inject("cancelDeleteAnnotateLabel");
 const applyLabelToActive = inject("applyLabelToActive");
-const syncAnnotationLabels = inject("syncAnnotationLabels");
+const applyAnnotationLabel = inject("applyAnnotationLabel");
 const toggleAnnotationConfirmed = inject("toggleAnnotationConfirmed");
 const changeAnnotateFiles = inject("changeAnnotateFiles");
 const previewUrl = inject("previewUrl");
@@ -172,4 +234,14 @@ const saveStateText = inject("saveStateText");
 const setYoloZoom = inject("setYoloZoom");
 const resetYoloZoom = inject("resetYoloZoom");
 const selectAdjacentFile = inject("selectAdjacentFile");
+const canRunAnnotateAi = inject("canRunAnnotateAi");
+const formatAnnotationLabel = inject("formatAnnotationLabel");
+const annotationPolygonStyle = inject("annotationPolygonStyle");
+const labelChipStyle = inject("labelChipStyle");
+const labelSwatchStyle = inject("labelSwatchStyle");
+const annotationRowAccentStyle = inject("annotationRowAccentStyle");
+
+function onAnnotationLabelChange(item, value) {
+  applyAnnotationLabel(item, value);
+}
 </script>

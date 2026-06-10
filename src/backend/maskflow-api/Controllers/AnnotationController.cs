@@ -33,6 +33,22 @@ public sealed class AnnotationController : ControllerBase
 
         var file = store.State.Files.FirstOrDefault(x => x.Id == request.FileId && x.UserId == user.Id);
         if (file is null || !await store.StoredObjectExistsAsync(file.Path)) return NotFound(new { detail = "File not found." });
+        if (string.IsNullOrWhiteSpace(file.ProjectId))
+        {
+            return BadRequest(new { detail = "File must belong to a project before auto annotation." });
+        }
+
+        var projectLabels = store.GetProjectLabels(user.Id, file.ProjectId);
+        if (projectLabels.Count == 0)
+        {
+            return BadRequest(new { detail = "Add at least one label to the project before running auto annotation." });
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.DefaultLabel)
+            && MaskFlowStore.ResolveLabelClassId(request.DefaultLabel, projectLabels) < 0)
+        {
+            return BadRequest(new { detail = "DefaultLabel is not in project labels." });
+        }
 
         await using var slot = await samGate.TryAcquireAsync(HttpContext.RequestAborted);
         if (slot is null)
@@ -62,7 +78,7 @@ public sealed class AnnotationController : ControllerBase
                 };
             }
 
-            var saveRequest = BuildAnnotationSaveRequest(file.Id, body);
+            var saveRequest = BuildAnnotationSaveRequest(file.Id, body, request.DefaultLabel, projectLabels);
             var (set, _) = await store.PersistAutoAnnotationAsync(user.Id, saveRequest, file);
             return Ok(new { annotation = set, user = store.PublicUser(store.GetUser(user.Id)!) });
         }
@@ -181,13 +197,24 @@ public sealed class AnnotationController : ControllerBase
         }
     }
 
-    private static AnnotationSaveRequest BuildAnnotationSaveRequest(int fileId, string body)
+    private static AnnotationSaveRequest BuildAnnotationSaveRequest(
+        int fileId,
+        string body,
+        string? defaultLabel,
+        IReadOnlyList<string> projectLabels)
     {
         using var document = JsonDocument.Parse(body);
         var root = document.RootElement;
         var width = root.TryGetProperty("width", out var widthElement) ? widthElement.GetInt32() : 0;
         var height = root.TryGetProperty("height", out var heightElement) ? heightElement.GetInt32() : 0;
         var items = new List<AnnotationItem>();
+        var assignedLabel = string.IsNullOrWhiteSpace(defaultLabel) ? null : defaultLabel.Trim();
+        var classId = MaskFlowStore.ResolveLabelClassId(assignedLabel, projectLabels);
+        if (assignedLabel is not null && classId < 0)
+        {
+            assignedLabel = null;
+            classId = -1;
+        }
 
         if (root.TryGetProperty("masks", out var masks) && masks.ValueKind == JsonValueKind.Array)
         {
@@ -207,8 +234,8 @@ public sealed class AnnotationController : ControllerBase
 
                 items.Add(new AnnotationItem(
                     mask.TryGetProperty("id", out var id) ? id.GetString() ?? $"ann_{index}" : $"ann_{index}",
-                    0,
-                    "object",
+                    classId,
+                    assignedLabel,
                     new YoloBox(
                         box.TryGetProperty("cx", out var cx) ? cx.GetDouble() : 0,
                         box.TryGetProperty("cy", out var cy) ? cy.GetDouble() : 0,

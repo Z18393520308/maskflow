@@ -64,4 +64,19 @@ public sealed class ProjectsController : MaskFlowControllerBase
         var labels = await projectService.SaveLabelsAsync(user.Id, projectId, request.Labels);
         return Ok(new { labels });
     }
+
+    [HttpDelete("{projectId}/labels/{labelName}")]
+    public async Task<IActionResult> DeleteLabel(string projectId, string labelName, [FromQuery] string? replaceWith = null)
+    {
+        var user = CurrentUser();
+        try
+        {
+            var labels = await projectService.DeleteLabelAsync(user.Id, projectId, labelName, replaceWith);
+            return Ok(new { labels });
+        }
+        catch (BadHttpRequestException ex)
+        {
+            return StatusCode(ex.StatusCode, new { detail = ex.Message });
+        }
+    }
 }

@@ -1,5 +1,13 @@
 import { computed, nextTick, onMounted, provide, reactive, ref } from "vue";
 import { apiFetch, authHeaders, clearSession, downloadAuthenticated, formatBytes, saveSession, session, user as currentUser } from "../lib/api";
+import {
+  buildAnnotationBoxStyle,
+  buildAnnotationPolygonStyle,
+  buildAnnotationRowAccentStyle,
+  buildLabelChipStyle,
+  buildLabelSwatchStyle,
+  getLabelColor
+} from "../lib/labelColors";
 import heroPreviewRoad from "../assets/hero-preview-road.png";
 
 export function useMaskFlowApp() {
@@ -47,8 +55,11 @@ export function useMaskFlowApp() {
     width: 0,
     height: 0,
     conf: 0.25,
-    labels: ["object"],
+    labels: [],
+    defaultRunLabel: "",
     newLabel: "",
+    pendingDeleteLabel: "",
+    labelDeleteReplace: "",
     status: "请选择或上传图片",
     dirty: false,
     savedAt: null,
@@ -244,11 +255,57 @@ export function useMaskFlowApp() {
 
   async function loadProjectLabels() {
     if (!projects.selectedId) {
-      annotate.labels = ["object"];
+      annotate.labels = [];
+      annotate.defaultRunLabel = "";
       return;
     }
-    const data = await apiFetch(`/api/projects/${projects.selectedId}/labels`).catch(() => ({ labels: ["object"] }));
-    annotate.labels = data.labels?.length ? data.labels : ["object"];
+    const data = await apiFetch(`/api/projects/${projects.selectedId}/labels`).catch(() => ({ labels: [] }));
+    annotate.labels = data.labels ?? [];
+    syncDefaultRunLabel();
+  }
+
+  function isUnassignedLabel(label) {
+    return label === null || label === undefined || String(label).trim() === "";
+  }
+
+  function labelsEqual(a, b) {
+    if (isUnassignedLabel(a) && isUnassignedLabel(b)) return true;
+    if (isUnassignedLabel(a) || isUnassignedLabel(b)) return false;
+    return String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+  }
+
+  function findLabelIndex(label) {
+    if (isUnassignedLabel(label)) return -1;
+    const normalized = String(label).trim().toLowerCase();
+    return annotate.labels.findIndex((item) => item.toLowerCase() === normalized);
+  }
+
+  function syncDefaultRunLabel() {
+    if (!annotate.labels.length) {
+      annotate.defaultRunLabel = "";
+      return;
+    }
+    const currentIndex = findLabelIndex(annotate.defaultRunLabel);
+    if (currentIndex >= 0) return;
+    annotate.defaultRunLabel = annotate.labels[0];
+  }
+
+  function isExportableAnnotation(item) {
+    return !isUnassignedLabel(item?.label) && Number(item?.classId) >= 0;
+  }
+
+  function formatAnnotationLabel(label) {
+    return isUnassignedLabel(label) ? "未分配" : label;
+  }
+
+  function isAnnotationConfirmed(item) {
+    return Boolean(item?.confirmed ?? item?.Confirmed);
+  }
+
+  function normalizeAnnotationItem(item) {
+    const normalized = { ...item };
+    normalized.confirmed = isAnnotationConfirmed(item);
+    return normalized;
   }
 
   async function refreshFiles() {
@@ -517,14 +574,20 @@ export function useMaskFlowApp() {
     segment.overlay = segment.overlays[key];
   }
 
-  function applyAnnotation(annotation) {
+  function applyAnnotation(annotation, options = {}) {
     annotate.fileId = annotation.fileId;
     annotate.width = annotation.width || 0;
     annotate.height = annotation.height || 0;
-    annotate.annotations = (annotation.annotations || []).map((item) => ({ ...item }));
+    annotate.annotations = (annotation.annotations || []).map(normalizeAnnotationItem);
     annotate.activeId = annotate.annotations[0]?.id || "";
     normalizeAnnotationLabels();
-    markAnnotationSaved(annotate.annotations.length ? `已加载 ${annotate.annotations.length} 条标注` : "暂无标注");
+    if (options.status) {
+      markAnnotationSaved(options.status);
+    } else if (annotate.annotations.length) {
+      markAnnotationSaved(`已加载 ${annotate.annotations.length} 条标注`);
+    } else {
+      markAnnotationSaved("暂无标注");
+    }
   }
 
   function clearAnnotation() {
@@ -535,22 +598,37 @@ export function useMaskFlowApp() {
     annotate.dirty = false;
   }
 
-  function persistBatchLabels() {
-    ensureDefaultLabel();
-    if (!projects.selectedId) return;
-    apiFetch(`/api/projects/${projects.selectedId}/labels`, {
-      method: "PUT",
-      body: { labels: annotate.labels }
-    }).catch((error) => {
+  async function persistBatchLabels() {
+    if (!projects.selectedId) return annotate.labels;
+    try {
+      const data = await apiFetch(`/api/projects/${projects.selectedId}/labels`, {
+        method: "PUT",
+        body: { labels: annotate.labels }
+      });
+      annotate.labels = data.labels ?? annotate.labels;
+      syncDefaultRunLabel();
+      return annotate.labels;
+    } catch (error) {
       annotate.status = error.message;
-    });
+      throw error;
+    }
   }
 
   function normalizeAnnotationLabels(items = annotate.annotations) {
-    ensureDefaultLabel();
     for (const item of items) {
-      if (!annotate.labels.includes(item.label)) item.label = "object";
-      item.classId = Math.max(0, annotate.labels.indexOf(item.label));
+      if (isUnassignedLabel(item.label)) {
+        item.label = null;
+        item.classId = -1;
+        continue;
+      }
+      const classId = findLabelIndex(item.label);
+      if (classId < 0) {
+        item.label = null;
+        item.classId = -1;
+        continue;
+      }
+      item.label = annotate.labels[classId];
+      item.classId = classId;
     }
     return items;
   }
@@ -560,38 +638,71 @@ export function useMaskFlowApp() {
     markAnnotationDirty("标签已更新，记得保存");
   }
 
-  function syncBatchLabelsFromAnnotations() {
+  async function syncBatchLabelsFromAnnotations() {
     for (const item of annotate.annotations) {
-      const label = (item.label || "object").trim();
-      if (label && !annotate.labels.includes(label)) annotate.labels.push(label);
+      const label = isUnassignedLabel(item.label) ? "" : String(item.label).trim();
+      if (label && findLabelIndex(label) < 0) annotate.labels.push(label);
     }
-    persistBatchLabels();
+    await persistBatchLabels();
   }
 
-  function addAnnotateLabel() {
+  async function addAnnotateLabel() {
     const label = annotate.newLabel.trim();
     if (!label) return;
-    if (!annotate.labels.includes(label)) annotate.labels.push(label);
-    persistBatchLabels();
+    if (findLabelIndex(label) < 0) annotate.labels.push(label);
+    if (!annotate.labels.length || annotate.labels.length === 1) annotate.defaultRunLabel = label;
+    await persistBatchLabels();
     annotate.newLabel = "";
   }
 
-  function ensureDefaultLabel() {
-    if (!annotate.labels.includes("object")) annotate.labels.unshift("object");
+  function beginDeleteAnnotateLabel(label) {
+    annotate.pendingDeleteLabel = label;
+    const others = annotate.labels.filter((item) => item !== label);
+    annotate.labelDeleteReplace = others[0] ?? "";
   }
 
-  async function deleteAnnotateLabel(label) {
-    if (label === "object") {
-      annotate.status = "默认标签 object 不能删除";
-      return;
+  function cancelDeleteAnnotateLabel() {
+    annotate.pendingDeleteLabel = "";
+    annotate.labelDeleteReplace = "";
+  }
+
+  async function confirmDeleteAnnotateLabel() {
+    const label = annotate.pendingDeleteLabel;
+    if (!label || !projects.selectedId) return;
+    const replaceWith = annotate.labelDeleteReplace;
+    loading.value = true;
+    annotate.status = `正在从项目中删除标签 ${label}`;
+    try {
+      const query = replaceWith ? `?replaceWith=${encodeURIComponent(replaceWith)}` : "";
+      const data = await apiFetch(
+        `/api/projects/${projects.selectedId}/labels/${encodeURIComponent(label)}${query}`,
+        { method: "DELETE" }
+      );
+      annotate.labels = data.labels ?? [];
+      if (annotate.defaultRunLabel === label) {
+        annotate.defaultRunLabel = annotate.labels[0] ?? "";
+      }
+      syncDefaultRunLabel();
+      if (annotate.current?.id) {
+        try {
+          const current = await apiFetch(`/api/annotations/file/${annotate.current.id}`);
+          applyAnnotation(current.annotation);
+        } catch {
+          normalizeAnnotationLabels();
+        }
+      } else {
+        normalizeAnnotationLabels();
+      }
+      await refreshFiles();
+      annotate.pendingDeleteLabel = "";
+      annotate.labelDeleteReplace = "";
+      const tail = replaceWith ? `已替换为 ${replaceWith}` : "相关目标已标为未分配";
+      annotate.status = `标签 ${label} 已删除，${tail}`;
+    } catch (error) {
+      annotate.status = error.message;
+    } finally {
+      loading.value = false;
     }
-    annotate.labels = annotate.labels.filter((item) => item !== label);
-    normalizeAnnotationLabels();
-    ensureDefaultLabel();
-    persistBatchLabels();
-    annotate.status = `正在从本批次标注中移除 ${label}`;
-    await replaceLabelInBatch(label, "object");
-    annotate.status = `标签 ${label} 已删除，本批次中已使用该标签的目标已回退为 object`;
   }
 
   function applyLabelToActive(label) {
@@ -602,7 +713,15 @@ export function useMaskFlowApp() {
     }
     active.label = label;
     normalizeAnnotationLabels();
+    if (isExportableAnnotation(active)) active.confirmed = true;
     markAnnotationDirty(`已将选中目标设置为 ${label}`);
+  }
+
+  function applyAnnotationLabel(item, value) {
+    item.label = value || null;
+    normalizeAnnotationLabels([item]);
+    if (isExportableAnnotation(item)) item.confirmed = true;
+    markAnnotationDirty(isExportableAnnotation(item) ? "标签已更新并标记为人工已确认，记得保存" : "标签已更新，记得保存");
   }
 
   async function replaceLabelInBatch(fromLabel, toLabel) {
@@ -624,10 +743,12 @@ export function useMaskFlowApp() {
           continue;
         }
       }
-      const nextItems = (annotation.annotations || []).map((item) => ({
-        ...item,
-        label: item.label === fromLabel ? toLabel : item.label
-      }));
+      const nextItems = (annotation.annotations || []).map((item) =>
+        normalizeAnnotationItem({
+          ...item,
+          label: labelsEqual(item.label, fromLabel) ? toLabel : item.label
+        })
+      );
       normalizeAnnotationLabels(nextItems);
       const saved = await apiFetch(`/api/annotations/file/${file.id}`, {
         method: "PUT",
@@ -691,10 +812,17 @@ export function useMaskFlowApp() {
   });
   const currentFileIndex = computed(() => files.rows.findIndex((file) => file.id === annotate.current?.id));
   const activeAnnotation = computed(() => annotate.annotations.find((item) => item.id === annotate.activeId) || null);
+  const canRunAnnotateAi = computed(() => annotate.labels.length > 0);
   const annotationStats = computed(() => {
     const total = annotate.annotations.length;
-    const confirmed = annotate.annotations.filter((item) => item.confirmed).length;
-    return { total, confirmed, pending: Math.max(0, total - confirmed) };
+    const confirmed = annotate.annotations.filter((item) => isAnnotationConfirmed(item)).length;
+    const unassigned = annotate.annotations.filter((item) => isUnassignedLabel(item.label)).length;
+    return {
+      total,
+      confirmed,
+      pending: Math.max(0, total - confirmed),
+      unassigned
+    };
   });
   const saveStateText = computed(() => {
     if (annotate.dirty) return "有未保存修改";
@@ -752,7 +880,11 @@ export function useMaskFlowApp() {
   async function runMaskForFile(file, { updateCurrent = true } = {}) {
     const data = await apiFetch("/api/annotations/auto", {
       method: "POST",
-      body: { fileId: file.id, conf: Number(annotate.conf) }
+      body: {
+        fileId: file.id,
+        conf: Number(annotate.conf),
+        defaultLabel: annotate.defaultRunLabel || null
+      }
     });
     if (updateCurrent) applyAnnotation(data.annotation);
     if (data.user) {
@@ -765,6 +897,10 @@ export function useMaskFlowApp() {
   async function runCurrentMask() {
     if (!annotate.current?.id) {
       annotate.status = "请先选择一张已上传图片";
+      return;
+    }
+    if (!annotate.labels.length) {
+      annotate.status = "请先添加至少一个项目标签";
       return;
     }
     loading.value = true;
@@ -789,6 +925,10 @@ export function useMaskFlowApp() {
     }
     if (!files.rows.length) {
       annotate.status = "请先上传图片";
+      return;
+    }
+    if (!annotate.labels.length) {
+      annotate.status = "请先添加至少一个项目标签";
       return;
     }
     loading.value = true;
@@ -821,7 +961,12 @@ export function useMaskFlowApp() {
   async function saveAnnotation() {
     if (!annotate.current?.id) return;
     loading.value = true;
-    normalizeAnnotationLabels();
+    const annotations = annotate.annotations.map((item) => {
+      const normalized = normalizeAnnotationItem(item);
+      if (isExportableAnnotation(normalized)) normalized.confirmed = true;
+      return normalized;
+    });
+    normalizeAnnotationLabels(annotations);
     try {
       const data = await apiFetch(`/api/annotations/file/${annotate.current.id}`, {
         method: "PUT",
@@ -829,12 +974,11 @@ export function useMaskFlowApp() {
           fileId: annotate.current.id,
           width: annotate.width,
           height: annotate.height,
-          annotations: annotate.annotations
+          annotations
         }
       });
-      applyAnnotation(data.annotation);
+      applyAnnotation(data.annotation, { status: "标注已保存" });
       await refreshFiles();
-      markAnnotationSaved("标注已保存");
     } catch (error) {
       annotate.status = error.message;
     } finally {
@@ -845,8 +989,8 @@ export function useMaskFlowApp() {
   function toggleAnnotationConfirmed(annotationId) {
     const item = annotate.annotations.find((a) => a.id === annotationId);
     if (item) {
-      item.confirmed = !item.confirmed;
-      markAnnotationDirty(item.confirmed ? "目标已确认，记得保存" : "目标已取消确认，记得保存");
+      item.confirmed = !isAnnotationConfirmed(item);
+      markAnnotationDirty(item.confirmed ? "目标已人工确认，记得保存" : "目标已取消确认，记得保存");
     }
   }
 
@@ -858,15 +1002,23 @@ export function useMaskFlowApp() {
 
   function yoloTxt() {
     normalizeAnnotationLabels();
-    return annotate.annotations.map((item) => {
-      if (item.segment?.length >= 6) return `${item.classId || 0} ${item.segment.map((v) => Number(v).toFixed(6)).join(" ")}`;
-      const box = item.bbox || { cx: 0.5, cy: 0.5, width: 0.2, height: 0.2 };
-      return `${item.classId || 0} ${Number(box.cx).toFixed(6)} ${Number(box.cy).toFixed(6)} ${Number(box.width).toFixed(6)} ${Number(box.height).toFixed(6)}`;
-    }).join("\n");
+    return annotate.annotations
+      .filter(isExportableAnnotation)
+      .map((item) => {
+        if (item.segment?.length >= 6) return `${item.classId} ${item.segment.map((v) => Number(v).toFixed(6)).join(" ")}`;
+        const box = item.bbox || { cx: 0.5, cy: 0.5, width: 0.2, height: 0.2 };
+        return `${item.classId} ${Number(box.cx).toFixed(6)} ${Number(box.cy).toFixed(6)} ${Number(box.width).toFixed(6)} ${Number(box.height).toFixed(6)}`;
+      })
+      .join("\n");
   }
 
   function downloadCurrentTxt() {
-    const blob = new Blob([yoloTxt()], { type: "text/plain" });
+    const txt = yoloTxt();
+    if (!txt) {
+      annotate.status = "没有可导出的已分配标签标注";
+      return;
+    }
+    const blob = new Blob([txt], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -876,13 +1028,27 @@ export function useMaskFlowApp() {
   }
 
   function annotationBoxStyle(item) {
-    const box = item.bbox || { cx: 0.5, cy: 0.5, width: 0.2, height: 0.2 };
-    return {
-      left: `${(box.cx - box.width / 2) * 100}%`,
-      top: `${(box.cy - box.height / 2) * 100}%`,
-      width: `${box.width * 100}%`,
-      height: `${box.height * 100}%`
-    };
+    return buildAnnotationBoxStyle(item, annotate.labels, annotate.activeId === item.id);
+  }
+
+  function annotationPolygonStyle(item) {
+    return buildAnnotationPolygonStyle(item, annotate.labels, annotate.activeId === item.id);
+  }
+
+  function labelChipStyle(label) {
+    return buildLabelChipStyle(label, annotate.labels);
+  }
+
+  function labelSwatchStyle(label) {
+    return buildLabelSwatchStyle(label, annotate.labels);
+  }
+
+  function annotationRowAccentStyle(item) {
+    return buildAnnotationRowAccentStyle(item, annotate.labels);
+  }
+
+  function labelColor(label) {
+    return getLabelColor(label, annotate.labels);
   }
 
   const yoloFrameStyle = computed(() => ({
@@ -979,6 +1145,11 @@ export function useMaskFlowApp() {
     }
     if (exportSplitTotal() !== 100) {
       exportPage.status = "train / val / test 比例之和必须为 100";
+      return;
+    }
+    if (!annotate.labels.length) {
+      exportPage.status = "请先添加项目标签后再导出";
+      if (page.value === "annotate") annotate.status = exportPage.status;
       return;
     }
     loading.value = true;
@@ -1146,9 +1317,11 @@ export function useMaskFlowApp() {
     segment, settings, settingsTabs, billingPlans, billingExplain, billingFaqs, exportPage,
     saveSession, session, authHeaders, selectAnnotateFile, runCurrentMask, runMasks, saveAnnotation,
     removeAnnotation, toggleAnnotationConfirmed, activeAnnotation, annotationStats, currentFileIndex,
-    saveStateText, yoloTxt, annotationBoxStyle, segmentPoints, yoloFrameStyle, updateYoloFrame,
-    setYoloZoom, resetYoloZoom, selectAdjacentFile, addAnnotateLabel, deleteAnnotateLabel,
-    applyLabelToActive, syncBatchLabelsFromAnnotations, syncAnnotationLabels, changeAnnotateFiles,
+    saveStateText, yoloTxt, annotationBoxStyle, annotationPolygonStyle, labelChipStyle, labelSwatchStyle,
+    annotationRowAccentStyle, labelColor, segmentPoints, yoloFrameStyle, updateYoloFrame,
+    setYoloZoom, resetYoloZoom, selectAdjacentFile, addAnnotateLabel, beginDeleteAnnotateLabel,
+    confirmDeleteAnnotateLabel, cancelDeleteAnnotateLabel, canRunAnnotateAi, formatAnnotationLabel,
+    applyLabelToActive, applyAnnotationLabel, syncBatchLabelsFromAnnotations, syncAnnotationLabels, changeAnnotateFiles,
     previewUrl, downloadCurrentTxt, selectProject, createProject, deleteFile, deleteCurrentProject,
     createExport, exportSplitTotal, downloadExportItem, formatDateTime, needsLogin, uploadFiles,
     runSegment, selectSegmentFile, showSegmentOverlay, subscribe, saveSettings, changePassword,
@@ -1213,14 +1386,24 @@ export function useMaskFlowApp() {
     yoloTxt,
     downloadCurrentTxt,
     annotationBoxStyle,
+    annotationPolygonStyle,
+    labelChipStyle,
+    labelSwatchStyle,
+    annotationRowAccentStyle,
+    labelColor,
     segmentPoints,
     updateYoloFrame,
     setYoloZoom,
     resetYoloZoom,
     selectAdjacentFile,
     addAnnotateLabel,
-    deleteAnnotateLabel,
+    beginDeleteAnnotateLabel,
+    confirmDeleteAnnotateLabel,
+    cancelDeleteAnnotateLabel,
+    canRunAnnotateAi,
+    formatAnnotationLabel,
     applyLabelToActive,
+    applyAnnotationLabel,
     syncBatchLabelsFromAnnotations,
     syncAnnotationLabels,
     changeAnnotateFiles,

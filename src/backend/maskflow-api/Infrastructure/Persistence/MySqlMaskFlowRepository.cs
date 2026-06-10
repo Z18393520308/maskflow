@@ -72,7 +72,7 @@ public sealed class MySqlMaskFlowRepository : IMaskFlowRepository
         return state;
     }
 
-    public async Task SaveAsync(MaskFlowState state)
+    public async Task SaveAsync(MaskFlowState state, IReadOnlyCollection<string>? syncProjectLabelIds = null)
     {
         await using var connection = new MySqlConnection(connectionString);
         await connection.OpenAsync();
@@ -100,7 +100,10 @@ public sealed class MySqlMaskFlowRepository : IMaskFlowRepository
                     ["id", "user_id", "name", "description", "data_type", "split_json", "image_count", "annotation_count", "created_at", "updated_at"],
                     [x.Id, x.UserId, x.Name, x.Description, x.DataType, Json(x.Split), x.ImageCount, x.AnnotationCount, x.CreatedAt, x.UpdatedAt]);
 
-            await SyncProjectLabelsAsync(connection, tx, state);
+            if (syncProjectLabelIds is { Count: > 0 })
+            {
+                await SyncProjectLabelsAsync(connection, tx, state, syncProjectLabelIds);
+            }
 
             await PruneExceptAsync(connection, tx, "files", "id", state.Files.Select(x => x.Id));
             foreach (var x in state.Files)
@@ -338,20 +341,17 @@ public sealed class MySqlMaskFlowRepository : IMaskFlowRepository
         await command.ExecuteNonQueryAsync();
     }
 
-    async Task SyncProjectLabelsAsync(MySqlConnection connection, MySqlTransaction tx, MaskFlowState state)
+    async Task SyncProjectLabelsAsync(MySqlConnection connection, MySqlTransaction tx, MaskFlowState state, IReadOnlyCollection<string> projectIds)
     {
-        var projectIds = state.ProjectLabels.Keys.ToList();
-        await PruneExceptAsync(connection, tx, "project_labels", "project_id", projectIds);
-
-        foreach (var pair in state.ProjectLabels)
+        foreach (var projectId in projectIds)
         {
-            var labels = pair.Value;
+            var labels = state.ProjectLabels.TryGetValue(projectId, out var stored) ? stored : [];
             if (labels.Count == 0)
             {
                 await using var clear = connection.CreateCommand();
                 clear.Transaction = tx;
                 clear.CommandText = "DELETE FROM `project_labels` WHERE `project_id` = @project_id";
-                clear.Parameters.AddWithValue("@project_id", pair.Key);
+                clear.Parameters.AddWithValue("@project_id", projectId);
                 await clear.ExecuteNonQueryAsync();
                 continue;
             }
@@ -360,7 +360,7 @@ public sealed class MySqlMaskFlowRepository : IMaskFlowRepository
             prune.Transaction = tx;
             var placeholders = labels.Select((_, i) => "@label" + i).ToArray();
             prune.CommandText = $"DELETE FROM `project_labels` WHERE `project_id` = @project_id AND `label_name` NOT IN ({string.Join(", ", placeholders)})";
-            prune.Parameters.AddWithValue("@project_id", pair.Key);
+            prune.Parameters.AddWithValue("@project_id", projectId);
             for (var i = 0; i < labels.Count; i++) prune.Parameters.AddWithValue("@label" + i, labels[i]);
             await prune.ExecuteNonQueryAsync();
 
@@ -368,7 +368,7 @@ public sealed class MySqlMaskFlowRepository : IMaskFlowRepository
             {
                 await UpsertAsync(connection, tx, "project_labels",
                     ["project_id", "label_name", "sort_order"],
-                    [pair.Key, labels[i], i]);
+                    [projectId, labels[i], i]);
             }
         }
     }

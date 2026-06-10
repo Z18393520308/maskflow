@@ -38,7 +38,7 @@ public record ProjectCreate(string Name, string? Description, string? DataType, 
 public record ProjectLabelsRequest(List<string> Labels);
 public record TaskCreate(string Type, string? Title, string? ProjectId, int? FileId, int ImageCount = 1);
 public record ExportRequest(string? ProjectId, string? TaskId, SplitConfig? Split, string Format = "yolo");
-public record AnnotationAutoRequest(int FileId, double Conf = 0.25);
+public record AnnotationAutoRequest(int FileId, double Conf = 0.25, string? DefaultLabel = null);
 public record AnnotationSaveRequest(int FileId, int Width, int Height, List<AnnotationItem> Annotations);
 public record JobCreate(string Type, int UserId, string? ProjectId, Dictionary<string, object?> Input, Dictionary<string, object?> Params);
 public record JobEventCreate(string EventType, Dictionary<string, object?> Payload, string? Status, double? Progress, string? Error);
@@ -55,7 +55,7 @@ public record SplitConfig(int Train, int Val, int Test);
 public record Project(string Id, int UserId, string Name, string Description, string DataType, SplitConfig Split, int ImageCount, int AnnotationCount, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
 public record FileItem(int Id, int UserId, string? ProjectId, string Name, string Path, long Size, string Kind, string? ContentType, DateTimeOffset CreatedAt, string DownloadUrl);
 public record AnnotationSet(string Id, int UserId, int FileId, int Width, int Height, List<AnnotationItem> Annotations, string YoloTxt, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
-public record AnnotationItem(string Id, int ClassId, string Label, YoloBox Bbox, List<double>? Segment, double Confidence, bool Confirmed = false);
+public record AnnotationItem(string Id, int ClassId, string? Label, YoloBox Bbox, List<double>? Segment, double Confidence, bool Confirmed = false);
 public record YoloBox(double Cx, double Cy, double Width, double Height);
 public record TaskItem(string Id, int UserId, string JobId, string Type, string? Title, string? ProjectId, int? FileId, int ImageCount, string Status, double Progress, Dictionary<string, object?>? Result, string? ErrorMessage, DateTimeOffset CreatedAt, DateTimeOffset? StartedAt, DateTimeOffset? FinishedAt);
 public record DatasetExport(string Id, int UserId, string? ProjectId, string? TaskId, string Status, string? Path, long Size, ExportRequest Config, DateTimeOffset CreatedAt, DateTimeOffset? FinishedAt, string? ErrorMessage, string? DownloadUrl);

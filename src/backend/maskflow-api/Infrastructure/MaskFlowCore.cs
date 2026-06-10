@@ -22,6 +22,7 @@ public sealed class MaskFlowStore
     string MinioBucket => Environment.GetEnvironmentVariable("MASKFLOW_MINIO_BUCKET") ?? "maskflow";
     bool UseMinio => !string.IsNullOrWhiteSpace(MinioEndpoint);
     public MaskFlowState State { get; private set; } = new();
+    readonly HashSet<string> pendingProjectLabelSync = new(StringComparer.Ordinal);
 
     public MaskFlowStore(IMaskFlowRepository repository)
     {
@@ -46,7 +47,7 @@ public sealed class MaskFlowStore
         try
         {
             mutate?.Invoke();
-            await repository.SaveAsync(State);
+            await repository.SaveAsync(State, TakePendingProjectLabelSync());
         }
         finally
         {
@@ -64,13 +65,27 @@ public sealed class MaskFlowStore
                 await mutateAsync();
             }
 
-            await repository.SaveAsync(State);
+            await repository.SaveAsync(State, TakePendingProjectLabelSync());
         }
         finally
         {
             gate.Release();
         }
     }
+
+    IReadOnlyCollection<string>? TakePendingProjectLabelSync()
+    {
+        if (pendingProjectLabelSync.Count == 0)
+        {
+            return null;
+        }
+
+        var ids = pendingProjectLabelSync.ToList();
+        pendingProjectLabelSync.Clear();
+        return ids;
+    }
+
+    void MarkProjectLabelsDirty(string projectId) => pendingProjectLabelSync.Add(projectId);
 
     public async Task<T> MutateAsync<T>(Func<MaskFlowState, T> mutate)
     {
@@ -378,7 +393,8 @@ public sealed class MaskFlowStore
             project = new Project("proj_" + Util.Id(), userId, request.Name, request.Description ?? "", request.DataType ?? "detection",
                 request.Split ?? new SplitConfig(70, 20, 10), 0, 0, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
             State.Projects.Add(project);
-            State.ProjectLabels[project.Id] = ["object"];
+            State.ProjectLabels[project.Id] = [];
+            MarkProjectLabelsDirty(project.Id);
         });
         return project!;
     }
@@ -427,6 +443,7 @@ public sealed class MaskFlowStore
 
             State.Tasks.RemoveAll(x => x.UserId == userId && x.ProjectId == projectId);
             State.Exports.RemoveAll(x => x.UserId == userId && x.ProjectId == projectId);
+            MarkProjectLabelsDirty(projectId);
             State.ProjectLabels.Remove(projectId);
             State.Projects.Remove(project);
             deleted = true;
@@ -523,12 +540,10 @@ public sealed class MaskFlowStore
         if (project is null) throw new BadHttpRequestException("Project not found.", 404);
         if (!State.ProjectLabels.TryGetValue(projectId, out var labels) || labels.Count == 0)
         {
-            return ["object"];
+            return [];
         }
 
-        var resolved = labels.ToList();
-        if (!resolved.Contains("object", StringComparer.OrdinalIgnoreCase)) resolved.Insert(0, "object");
-        return resolved;
+        return labels.ToList();
     }
 
     public async Task<List<string>> SaveProjectLabelsAsync(int userId, string projectId, IEnumerable<string>? labels)
@@ -547,9 +562,53 @@ public sealed class MaskFlowStore
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
-        if (!cleaned.Contains("object", StringComparer.OrdinalIgnoreCase)) cleaned.Insert(0, "object");
         State.ProjectLabels[projectId] = cleaned;
+        MarkProjectLabelsDirty(projectId);
         return cleaned;
+    }
+
+    public async Task<List<string>> DeleteProjectLabelAsync(int userId, string projectId, string labelName, string? replaceWith = null)
+    {
+        List<string>? cleaned = null;
+        await SaveAsync(() =>
+        {
+            var labels = GetProjectLabels(userId, projectId).ToList();
+            if (!labels.Any(x => x.Equals(labelName.Trim(), StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new BadHttpRequestException("Label not found in project.", 404);
+            }
+
+            labels.RemoveAll(x => x.Equals(labelName.Trim(), StringComparison.OrdinalIgnoreCase));
+            cleaned = ApplyProjectLabels(userId, projectId, labels);
+
+            string? replacement = string.IsNullOrWhiteSpace(replaceWith) ? null : replaceWith.Trim();
+            if (replacement is not null && ResolveLabelClassId(replacement, cleaned) < 0)
+            {
+                throw new BadHttpRequestException("replaceWith is not in project labels.", 400);
+            }
+
+            var fileIds = State.Files
+                .Where(x => x.UserId == userId && x.ProjectId == projectId)
+                .Select(x => x.Id)
+                .ToHashSet();
+            foreach (var set in State.AnnotationSets.Where(x => x.UserId == userId && fileIds.Contains(x.FileId)).ToList())
+            {
+                var nextAnnotations = set.Annotations
+                    .Select(item => item.Label is not null && item.Label.Equals(labelName, StringComparison.OrdinalIgnoreCase)
+                        ? item with { Label = replacement }
+                        : item)
+                    .ToList();
+                var normalized = NormalizeAnnotations(nextAnnotations, cleaned);
+                State.AnnotationSets.Remove(set);
+                State.AnnotationSets.Add(set with
+                {
+                    Annotations = normalized,
+                    YoloTxt = BuildYoloTxt(normalized),
+                    UpdatedAt = DateTimeOffset.UtcNow
+                });
+            }
+        });
+        return cleaned!;
     }
 
     public async Task<NotificationSettings> UpdateNotificationSettingsAsync(int userId, NotificationSettings request)
@@ -697,24 +756,39 @@ public sealed class MaskFlowStore
         return settlement!;
     }
 
-    public static List<AnnotationItem> NormalizeAnnotations(List<AnnotationItem>? annotations, IReadOnlyList<string>? projectLabels = null)
+    public static bool IsExportableAnnotation(AnnotationItem annotation) =>
+        !string.IsNullOrWhiteSpace(annotation.Label) && annotation.ClassId >= 0;
+
+    public static int ResolveLabelClassId(string? label, IReadOnlyList<string>? projectLabels)
     {
-        var labels = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        if (projectLabels is not null)
+        if (string.IsNullOrWhiteSpace(label) || projectLabels is null || projectLabels.Count == 0)
         {
-            for (var i = 0; i < projectLabels.Count; i++)
+            return -1;
+        }
+
+        var trimmed = label.Trim();
+        for (var i = 0; i < projectLabels.Count; i++)
+        {
+            if (projectLabels[i].Equals(trimmed, StringComparison.OrdinalIgnoreCase))
             {
-                if (!labels.ContainsKey(projectLabels[i])) labels[projectLabels[i]] = i;
+                return i;
             }
         }
+
+        return -1;
+    }
+
+    public static List<AnnotationItem> NormalizeAnnotations(List<AnnotationItem>? annotations, IReadOnlyList<string>? projectLabels = null)
+    {
         var normalized = new List<AnnotationItem>();
         foreach (var annotation in annotations ?? [])
         {
-            var label = string.IsNullOrWhiteSpace(annotation.Label) ? "object" : annotation.Label.Trim();
-            if (!labels.TryGetValue(label, out var classId))
+            var label = string.IsNullOrWhiteSpace(annotation.Label) ? null : annotation.Label.Trim();
+            var classId = ResolveLabelClassId(label, projectLabels);
+            if (label is not null && classId < 0)
             {
-                classId = projectLabels is null ? labels.Count : Math.Max(0, annotation.ClassId);
-                labels[label] = classId;
+                label = null;
+                classId = -1;
             }
 
             var box = annotation.Bbox;
@@ -725,16 +799,16 @@ public sealed class MaskFlowStore
                 Label = label,
                 Bbox = new YoloBox(Clamp01(box.Cx), Clamp01(box.Cy), Clamp01(box.Width), Clamp01(box.Height)),
                 Segment = annotation.Segment?.Select(Clamp01).ToList(),
-                Confidence = annotation.Confidence <= 0 ? 1.0 : annotation.Confidence
+                Confidence = annotation.Confidence <= 0 ? 1.0 : annotation.Confidence,
+                Confirmed = annotation.Confirmed
             });
         }
 
         return normalized;
     }
 
-    public static string BuildYoloTxt(IEnumerable<AnnotationItem> annotations)
-    {
-        var lines = annotations.Select(annotation =>
+    public static string BuildYoloTxt(IEnumerable<AnnotationItem> annotations) =>
+        string.Join("\n", annotations.Where(IsExportableAnnotation).Select(annotation =>
         {
             if (annotation.Segment is { Count: >= 6 })
             {
@@ -743,9 +817,7 @@ public sealed class MaskFlowStore
 
             var box = annotation.Bbox;
             return $"{annotation.ClassId} {FormatYolo(box.Cx)} {FormatYolo(box.Cy)} {FormatYolo(box.Width)} {FormatYolo(box.Height)}";
-        });
-        return string.Join("\n", lines);
-    }
+        }));
 
     public async Task<DatasetExport> CreateDatasetExportAsync(int userId, ExportRequest request)
     {
@@ -776,15 +848,29 @@ public sealed class MaskFlowStore
 
             using (var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
             {
-                var labels = request.ProjectId is not null && State.ProjectLabels.TryGetValue(request.ProjectId, out var projectLabels)
-                    ? projectLabels.ToList()
-                    : annotationMap.Values
-                    .SelectMany(x => x.Annotations)
-                    .Select(x => x.Label)
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .OrderBy(x => x)
-                    .ToList();
-                if (labels.Count == 0) labels.Add("object");
+                List<string> labels;
+                if (request.ProjectId is not null)
+                {
+                    labels = GetProjectLabels(userId, request.ProjectId);
+                    if (labels.Count == 0)
+                    {
+                        throw new BadHttpRequestException("Project has no labels. Add labels before export.", 400);
+                    }
+                }
+                else
+                {
+                    labels = annotationMap.Values
+                        .SelectMany(x => x.Annotations)
+                        .Where(IsExportableAnnotation)
+                        .Select(x => x.Label!)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    if (labels.Count == 0)
+                    {
+                        throw new BadHttpRequestException("No labeled annotations found for export.", 400);
+                    }
+                }
 
                 for (var index = 0; index < labeledFiles.Count; index++)
                 {
