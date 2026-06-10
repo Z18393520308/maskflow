@@ -132,12 +132,17 @@ function go(to) {
   history.pushState({}, "", to);
   path.value = window.location.pathname;
   message.value = "";
-  if (needsLogin(page.value) && !account.value) go("/auth.html");
+  if (needsLogin(page.value) && !account.value) {
+    const redirect = encodeURIComponent(path.value + window.location.search);
+    history.replaceState({}, "", `/auth.html?redirect=${redirect}`);
+    path.value = "/auth.html";
+    return;
+  }
   refreshPage();
 }
 
 function needsLogin(name) {
-  return !["home", "auth", "segment"].includes(name);
+  return !["home", "auth"].includes(name);
 }
 
 function logout() {
@@ -157,7 +162,8 @@ async function submitAuth() {
     });
     saveSession(data);
     account.value = data.user;
-    go("/dashboard.html");
+    const redirect = new URLSearchParams(location.search).get("redirect");
+    go(redirect && redirect.startsWith("/") ? redirect : "/dashboard.html");
   } catch (error) {
     message.value = error.message;
   } finally {
@@ -1011,10 +1017,18 @@ async function createExport() {
 }
 
 async function subscribe(plan) {
-  const data = await apiFetch("/api/billing/subscribe", { method: "POST", body: { plan } });
-  account.value = data.user;
-  saveSession({ ...session(), user: data.user });
-  message.value = "套餐已更新";
+  loading.value = true;
+  message.value = "";
+  try {
+    const data = await apiFetch("/api/billing/subscribe", { method: "POST", body: { plan } });
+    account.value = data.user;
+    saveSession({ ...session(), user: data.user });
+    message.value = "套餐已更新";
+  } catch (error) {
+    message.value = error.message;
+  } finally {
+    loading.value = false;
+  }
 }
 
 async function saveSettings() {

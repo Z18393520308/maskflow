@@ -50,7 +50,7 @@ public record SettlementCreate(int ProviderId, string Period, int NodeCount, dou
 public record AuthResult(string Token, PublicUser User);
 public record PublicUser(int Id, string Email, string Username, string Phone, string? AvatarUrl, string Plan, long QuotaBytes, long UsedBytes, long FreeBytes);
 public record User(int Id, string Email, string PasswordHash, string Salt, string Plan, long QuotaBytes, long UsedBytes, DateTimeOffset CreatedAt, string? Username, string? Phone, string? AvatarPath);
-public record Session(string Token, int UserId, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt);
+public record Session(string Token, int UserId, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt, string? DeviceId = null);
 public record SplitConfig(int Train, int Val, int Test);
 public record Project(string Id, int UserId, string Name, string Description, string DataType, SplitConfig Split, int ImageCount, int AnnotationCount, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
 public record FileItem(int Id, int UserId, string? ProjectId, string Name, string Path, long Size, string Kind, string? ContentType, DateTimeOffset CreatedAt, string DownloadUrl);

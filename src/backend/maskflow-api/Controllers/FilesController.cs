@@ -19,7 +19,6 @@ public sealed class FilesController : MaskFlowControllerBase
             files.Add(await Store.SaveUploadAsync(user, upload, projectId));
         }
 
-        await Store.SaveAsync();
         return Ok(new { files, user = Store.PublicUser(Store.GetUser(user.Id)!) });
     }
 

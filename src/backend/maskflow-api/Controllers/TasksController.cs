@@ -10,8 +10,7 @@ public sealed class TasksController : MaskFlowControllerBase
     public async Task<IActionResult> Create([FromBody] TaskCreate request)
     {
         var user = CurrentUser();
-        var task = Store.CreateTask(user.Id, request.Type, request.Title, request.ProjectId, request.FileId, request.ImageCount);
-        await Store.SaveAsync();
+        var task = await Store.CreateTaskAsync(user.Id, request.Type, request.Title, request.ProjectId, request.FileId, request.ImageCount);
         return Ok(new { task });
     }
 
@@ -34,8 +33,7 @@ public sealed class TasksController : MaskFlowControllerBase
     public async Task<IActionResult> Cancel(string taskId)
     {
         var user = CurrentUser();
-        var task = Store.UpdateTask(user.Id, taskId, "cancelled", 0.0, null);
-        await Store.SaveAsync();
+        var task = await Store.UpdateTaskAsync(user.Id, taskId, "cancelled", 0.0, null);
         return task is null ? NotFound(new { detail = "Task not found." }) : Ok(new { task });
     }
 
@@ -43,8 +41,7 @@ public sealed class TasksController : MaskFlowControllerBase
     public async Task<IActionResult> Retry(string taskId)
     {
         var user = CurrentUser();
-        var task = Store.UpdateTask(user.Id, taskId, "queued", 0.0, null);
-        await Store.SaveAsync();
+        var task = await Store.UpdateTaskAsync(user.Id, taskId, "queued", 0.0, null);
         return task is null ? NotFound(new { detail = "Task not found." }) : Ok(new { task });
     }
 }

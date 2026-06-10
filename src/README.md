@@ -42,9 +42,14 @@ legacy/
 
 ### 启动后端
 
+需先配置 MySQL 连接（环境变量 `MASKFLOW_MYSQL`）。Docker 部署时由 `docker-compose.yml` 自动注入；本地开发可先执行 `docker compose up -d mysql`。
+
 ```powershell
+$env:MASKFLOW_MYSQL = "Server=127.0.0.1;Port=3306;Database=maskflow;User ID=maskflow;Password=maskflow;Allow User Variables=true;"
 dotnet run --project src\backend\maskflow-api\MaskFlow.Api.csproj --urls http://127.0.0.1:8010
 ```
+
+业务状态仅持久化到 MySQL，不再使用 `maskflow-state.json`。
 
 Swagger 调试界面：
 

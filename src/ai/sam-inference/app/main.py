@@ -14,8 +14,10 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from PIL import Image, ImageOps
 from starlette.concurrency import run_in_threadpool
+from starlette.requests import Request
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -40,8 +42,20 @@ ALLOW_CLIP_DOWNLOAD = os.getenv("SAM3_ALLOW_CLIP_DOWNLOAD", "false").lower() in 
     "on",
 }
 CLIP_MODEL_SHA256 = "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af"
+INTERNAL_KEY = os.getenv("SAM3_INTERNAL_KEY", "")
 
 app = FastAPI(title="SAM 3 Backend")
+
+
+@app.middleware("http")
+async def verify_internal_key(request: Request, call_next):
+    if INTERNAL_KEY and request.url.path.startswith("/api/"):
+        provided = request.headers.get("X-Internal-Key", "")
+        if provided != INTERNAL_KEY:
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("SAM3_CORS_ORIGINS", "*").split(","),

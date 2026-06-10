@@ -17,9 +17,7 @@ public sealed class SettlementsController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] SettlementCreate request)
     {
-        var settlement = new Settlement("settle_" + Util.Id(), request.ProviderId, request.Period, request.NodeCount, request.GrossAmount, request.PlatformFee, request.GrossAmount - request.PlatformFee, request.Status, DateTimeOffset.UtcNow, null);
-        store.State.Settlements.Add(settlement);
-        await store.SaveAsync();
+        var settlement = await store.AddSettlementAsync(request);
         return Ok(new { settlement });
     }
 }

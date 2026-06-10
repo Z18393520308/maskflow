@@ -24,9 +24,7 @@ public sealed class PoolsController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] PoolCreate request)
     {
-        var pool = new Pool(request.Id ?? "pool_" + Util.Id(), request.Name, request.Type, request.Region, "active", request.Capacity, request.Policy, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
-        store.State.Pools.Add(pool);
-        await store.SaveAsync();
+        var pool = await store.AddPoolAsync(request);
         return Ok(new { pool });
     }
 }

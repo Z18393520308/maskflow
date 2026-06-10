@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 [Route("api/billing")]
@@ -6,6 +7,7 @@ public sealed class BillingController : MaskFlowControllerBase
 {
     public BillingController(MaskFlowStore store) : base(store) { }
 
+    [AllowAnonymous]
     [HttpGet("plans")]
     public IActionResult Plans() => Ok(new
     {
@@ -21,7 +23,30 @@ public sealed class BillingController : MaskFlowControllerBase
     public async Task<IActionResult> Subscribe([FromBody] SubscribeRequest request)
     {
         var user = CurrentUser();
-        await Store.UpdatePlanAsync(user.Id, request.Plan);
+        var plan = (request.Plan ?? "").Trim().ToLowerInvariant();
+        if (plan is not ("free" or "pro" or "team"))
+        {
+            return BadRequest(new { detail = "Invalid plan." });
+        }
+
+        if (plan != "free")
+        {
+            var devBypass = string.Equals(
+                Environment.GetEnvironmentVariable("MASKFLOW_BILLING_DEV_MODE"),
+                "true",
+                StringComparison.OrdinalIgnoreCase);
+            if (!devBypass)
+            {
+                return StatusCode(402, new { detail = "Paid plans are not available yet. Payment integration pending." });
+            }
+        }
+
+        if (plan == "team" && !string.Equals(user.Plan, "team", StringComparison.OrdinalIgnoreCase))
+        {
+            return StatusCode(403, new { detail = "Team plan requires enterprise approval." });
+        }
+
+        await Store.UpdatePlanAsync(user.Id, plan);
         return Ok(new { user = Store.PublicUser(Store.GetUser(user.Id)!) });
     }
 }

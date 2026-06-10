@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 [Tags("Segmentation")]
@@ -13,6 +14,7 @@ public sealed class SegmentationController : ControllerBase
         this.clientFactory = clientFactory;
     }
 
+    [AllowAnonymous]
     [HttpGet("/api/segment/status")]
     public async Task<IActionResult> Status()
     {
@@ -22,21 +24,18 @@ public sealed class SegmentationController : ControllerBase
     [HttpPost("/api/segment")]
     public async Task<IActionResult> Segment()
     {
-        var user = store.OptionalUser(HttpContext);
-        if (user is not null)
+        var user = store.RequireUser(HttpContext);
+        try
         {
-            try
-            {
-                store.EnsureAiQuotaAvailable(user);
-            }
-            catch (BadHttpRequestException ex)
-            {
-                return StatusCode(ex.StatusCode, new { detail = ex.Message });
-            }
+            store.EnsureAiQuotaAvailable(user);
+        }
+        catch (BadHttpRequestException ex)
+        {
+            return StatusCode(ex.StatusCode, new { detail = ex.Message });
         }
 
         var result = await ForwardMultipartAsync("/api/segment");
-        if (result.Success && user is not null) await store.ConsumeAiQuotaAsync(user.Id, 1);
+        if (result.Success) await store.ConsumeAiQuotaAsync(user.Id, 1);
         return result.Response;
     }
 

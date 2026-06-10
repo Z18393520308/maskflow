@@ -1,3 +1,4 @@
+using MaskFlow.Api.Infrastructure.Security;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace MaskFlow.Api.Infrastructure;
@@ -8,6 +9,7 @@ public static class DependencyInjection
     {
         services.AddSingleton<IMaskFlowRepository, MySqlMaskFlowRepository>();
         services.AddSingleton<MaskFlowStore>();
+        services.AddSingleton<LoginRateLimiter>();
         return services;
     }
 }

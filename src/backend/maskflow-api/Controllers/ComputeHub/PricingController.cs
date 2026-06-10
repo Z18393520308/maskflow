@@ -16,9 +16,7 @@ public sealed class PricingController : ControllerBase
     [HttpPost("/v1/pricing")]
     public async Task<IActionResult> Create([FromBody] PricingCreate request)
     {
-        var rule = new PricingRule("price_" + Util.Id(), request.Name, request.ResourceType, request.Pool, request.Region, request.UnitPrice, request.BillingUnit, request.Status, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
-        store.State.PricingRules.Add(rule);
-        await store.SaveAsync();
+        var rule = await store.AddPricingRuleAsync(request);
         return Ok(new { rule });
     }
 }

@@ -11,9 +11,10 @@ public sealed class WalletController : ControllerBase
     }
 
     [HttpGet("/v1/wallet/balance")]
-    public IActionResult Balance([FromQuery] int userId = 0)
+    public IActionResult Balance()
     {
-        var balance = store.State.WalletLedger.Where(x => x.UserId == userId).Sum(x => x.Delta);
-        return Ok(new { userId, balance });
+        var user = store.RequireUser(HttpContext);
+        var balance = store.State.WalletLedger.Where(x => x.UserId == user.Id).Sum(x => x.Delta);
+        return Ok(new { userId = user.Id, balance });
     }
 }

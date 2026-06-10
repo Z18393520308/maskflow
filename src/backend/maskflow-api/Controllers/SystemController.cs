@@ -1,6 +1,8 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 [ApiController]
+[AllowAnonymous]
 [Tags("System")]
 public sealed class SystemController : ControllerBase
 {

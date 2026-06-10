@@ -52,6 +52,7 @@ sam3/
 - **.NET SDK** 9.0（后端）
 - **Python** 3.10+（SAM 推理，建议 CUDA 环境）
 - **NVIDIA GPU + 驱动**（SAM 推理，Docker 部署时必需）
+- **MySQL** 8.x（业务数据持久化，本地开发或 Docker 均可）
 - **Docker Desktop**（可选，用于一键部署）
 
 ## 模型文件
@@ -66,25 +67,43 @@ Docker Compose 会通过 volume 挂载该路径。若缺失，分割相关功能
 
 ## 快速开始（本地开发）
 
-### 1. 启动业务 API
+### 1. 启动 MySQL（本地开发）
+
+本地需先有一个可连接的 MySQL 实例。若使用 Docker Compose，可只启动数据库：
 
 ```powershell
+docker compose up -d mysql
+```
+
+默认连接串（与 `launchSettings.json` 一致）：
+
+```text
+Server=127.0.0.1;Port=3306;Database=maskflow;User ID=maskflow;Password=maskflow;Allow User Variables=true;
+```
+
+### 2. 启动业务 API
+
+```powershell
+# 业务数据持久化到 MySQL（必需）
+$env:MASKFLOW_MYSQL = "Server=127.0.0.1;Port=3306;Database=maskflow;User ID=maskflow;Password=maskflow;Allow User Variables=true;"
+
 # 已启动 MinIO 时，使用对象存储保存上传文件
 $env:MASKFLOW_MINIO_ENDPOINT = "http://127.0.0.1:9000"
 $env:MASKFLOW_MINIO_ACCESS_KEY = "admin"
 $env:MASKFLOW_MINIO_SECRET_KEY = "admin123456"
 $env:MASKFLOW_MINIO_BUCKET = "maskflow"
 $env:MASKFLOW_STORAGE = "src\backend\maskflow-api\data\storage"
-$env:MASKFLOW_STATE = "src\backend\maskflow-api\data\maskflow-state.json"
 
 dotnet run --project src\backend\maskflow-api\MaskFlow.Api.csproj --urls http://127.0.0.1:8010
 ```
 
 未启动 MinIO 时，可将 `MASKFLOW_MINIO_ENDPOINT` 设为空格 `" "` 以回退到本地磁盘存储。
 
+首次启动时 API 会自动建库建表；用户、项目等业务状态仅保存在 MySQL 中，不再写入 JSON 文件。
+
 Swagger：http://127.0.0.1:8010/swagger
 
-### 2. 启动前端
+### 3. 启动前端
 
 ```powershell
 cd src\frontend\maskflow-web
@@ -96,7 +115,7 @@ npm run dev -- --host 127.0.0.1 --port 3010
 
 前端开发服务器会将 `/api` 和 `/v1` 代理到 `http://127.0.0.1:8010`。
 
-### 3. 启动 SAM 推理服务（可选，分割功能需要）
+### 4. 启动 SAM 推理服务（可选，分割功能需要）
 
 ```powershell
 cd src\ai\sam-inference
@@ -118,6 +137,7 @@ docker compose up -d --build
 |------|------|
 | Web | http://localhost:3000 |
 | API | http://localhost:8000 |
+| MySQL | localhost:3306 |
 | SAM | http://localhost:8001 |
 | MinIO Console | http://localhost:9001 |
 

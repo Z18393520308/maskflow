@@ -9,11 +9,7 @@ public sealed class ProjectService
 
     public async Task<ProjectSummaryDto> CreateAsync(int userId, ProjectCreate request)
     {
-        var project = new Project("proj_" + Util.Id(), userId, request.Name, request.Description ?? "", request.DataType ?? "detection",
-            request.Split ?? new SplitConfig(70, 20, 10), 0, 0, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
-        store.State.Projects.Add(project);
-        store.State.ProjectLabels[project.Id] = ["object"];
-        await store.SaveAsync();
+        var project = await store.CreateProjectAsync(userId, request);
         return ToDto(userId, project);
     }
 
@@ -32,32 +28,16 @@ public sealed class ProjectService
 
     public async Task<ProjectSummaryDto?> UpdateAsync(int userId, string projectId, ProjectCreate request)
     {
-        var project = store.State.Projects.FirstOrDefault(x => x.Id == projectId && x.UserId == userId);
-        if (project is null) return null;
-        store.State.Projects.Remove(project);
-        var updated = project with
-        {
-            Name = request.Name,
-            Description = request.Description ?? project.Description,
-            DataType = request.DataType ?? project.DataType,
-            Split = request.Split ?? project.Split,
-            UpdatedAt = DateTimeOffset.UtcNow
-        };
-        store.State.Projects.Add(updated);
-        await store.SaveAsync();
-        return ToDto(userId, updated);
+        var updated = await store.UpdateProjectAsync(userId, projectId, request);
+        return updated is null ? null : ToDto(userId, updated);
     }
 
     public Task<bool> DeleteAsync(int userId, string projectId) => store.DeleteProjectAsync(userId, projectId);
 
     public List<string> GetLabels(int userId, string projectId) => store.GetProjectLabels(userId, projectId);
 
-    public async Task<List<string>> SaveLabelsAsync(int userId, string projectId, IEnumerable<string>? labels)
-    {
-        var saved = store.SaveProjectLabels(userId, projectId, labels);
-        await store.SaveAsync();
-        return saved;
-    }
+    public Task<List<string>> SaveLabelsAsync(int userId, string projectId, IEnumerable<string>? labels) =>
+        store.SaveProjectLabelsAsync(userId, projectId, labels);
 
     ProjectSummaryDto ToDto(int userId, Project project)
     {

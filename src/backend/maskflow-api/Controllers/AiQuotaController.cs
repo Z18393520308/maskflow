@@ -6,9 +6,9 @@ public sealed class AiQuotaController : MaskFlowControllerBase
     public AiQuotaController(MaskFlowStore store) : base(store) { }
 
     [HttpGet("/api/ai/quota")]
-    public IActionResult Quota()
+    public async Task<IActionResult> Quota()
     {
         var user = CurrentUser();
-        return Ok(new { quota = Store.GetQuota(user) });
+        return Ok(new { quota = await Store.GetQuotaAsync(user) });
     }
 }

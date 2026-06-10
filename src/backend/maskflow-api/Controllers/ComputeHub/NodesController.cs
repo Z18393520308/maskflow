@@ -20,16 +20,14 @@ public sealed class NodesController : ControllerBase
     public IActionResult Detail(string nodeId)
     {
         var node = store.State.Nodes.FirstOrDefault(x => x.Id == nodeId);
-        return node is null ? NotFound(new { detail = "Node not found" }) : Ok(new { node = node.Public(node.ApiKey) });
+        return node is null ? NotFound(new { detail = "Node not found" }) : Ok(new { node = node.Public() });
     }
 
     [HttpPost("register")]
     public async Task<IActionResult> Register([FromBody] NodeRegister request)
     {
         var apiKey = "mf_" + Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
-        var node = new Node("node_" + Util.Id(), request.OwnerId, request.Pool, "pending", request.GpuModel, request.VramGb, request.Region, request.PricePerHour, 0, Util.Sha256(apiKey), DateTimeOffset.UtcNow, null, null);
-        store.State.Nodes.Add(node);
-        await store.SaveAsync();
+        var node = await store.RegisterNodeAsync(request, apiKey);
         return Ok(new { node = node.Public(apiKey) });
     }
 

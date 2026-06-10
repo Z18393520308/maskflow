@@ -53,18 +53,8 @@ public sealed class AnnotationController : ControllerBase
                 };
             }
 
-            var set = BuildAnnotationSetFromSam(user.Id, file.Id, body);
-            var task = store.CreateTask(user.Id, "yolo_auto_annotation", $"自动标注 {file.Name}", file.ProjectId, file.Id, 1);
-            store.State.Tasks.Remove(task);
-            store.State.Tasks.Add(task with
-            {
-                Status = "completed",
-                Progress = 1,
-                Result = new Dictionary<string, object?> { ["fileId"] = file.Id, ["annotationCount"] = set.Annotations.Count },
-                FinishedAt = DateTimeOffset.UtcNow
-            });
-            await store.ConsumeAiQuotaAsync(user.Id, 1);
-            await store.SaveAsync();
+            var saveRequest = BuildAnnotationSaveRequest(file.Id, body);
+            var (set, _) = await store.PersistAutoAnnotationAsync(user.Id, saveRequest, file);
             return Ok(new { annotation = set, user = store.PublicUser(store.GetUser(user.Id)!) });
         }
         catch (BadHttpRequestException ex)
@@ -93,8 +83,7 @@ public sealed class AnnotationController : ControllerBase
     public async Task<IActionResult> SaveByFile(int fileId, [FromBody] AnnotationSaveRequest request)
     {
         var user = store.RequireUser(HttpContext);
-        var set = store.SaveAnnotationSet(user.Id, request with { FileId = fileId });
-        await store.SaveAsync();
+        var set = await store.SaveAnnotationSetAsync(user.Id, request with { FileId = fileId });
         return Ok(new { annotation = set });
     }
 
@@ -104,15 +93,23 @@ public sealed class AnnotationController : ControllerBase
         var user = store.RequireUser(HttpContext);
         var set = store.GetAnnotationSet(user.Id, fileId);
         if (set is null) return NotFound(new { detail = "Annotation not found." });
-        var next = store.SaveAnnotationSet(user.Id, new AnnotationSaveRequest(fileId, set.Width, set.Height, set.Annotations.Where(x => x.Id != annotationId).ToList()));
-        await store.SaveAsync();
+        var next = await store.SaveAnnotationSetAsync(user.Id, new AnnotationSaveRequest(fileId, set.Width, set.Height, set.Annotations.Where(x => x.Id != annotationId).ToList()));
         return Ok(new { annotation = next });
     }
 
     [HttpPost("/api/annotation/masks")]
     public async Task<IActionResult> Masks()
     {
-        var user = store.OptionalUser(HttpContext);
+        var user = store.RequireUser(HttpContext);
+        try
+        {
+            store.EnsureAiQuotaAvailable(user);
+        }
+        catch (BadHttpRequestException ex)
+        {
+            return StatusCode(ex.StatusCode, new { detail = ex.Message });
+        }
+
         if (!Request.HasFormContentType) return BadRequest(new { detail = "Multipart form data is required." });
         var form = await Request.ReadFormAsync();
         if (form.Files.Count == 0) return BadRequest(new { detail = "Image file is required." });
@@ -139,7 +136,7 @@ public sealed class AnnotationController : ControllerBase
             var client = clientFactory.CreateClient("sam");
             var response = await client.PostAsync("/api/annotation/masks", content, HttpContext.RequestAborted);
             var body = await response.Content.ReadAsStringAsync(HttpContext.RequestAborted);
-            if (response.IsSuccessStatusCode && user is not null) await store.ConsumeAiQuotaAsync(user.Id, 1);
+            if (response.IsSuccessStatusCode) await store.ConsumeAiQuotaAsync(user.Id, 1);
             return new ContentResult
             {
                 Content = body,
@@ -157,7 +154,7 @@ public sealed class AnnotationController : ControllerBase
         }
     }
 
-    private AnnotationSet BuildAnnotationSetFromSam(int userId, int fileId, string body)
+    private static AnnotationSaveRequest BuildAnnotationSaveRequest(int fileId, string body)
     {
         using var document = JsonDocument.Parse(body);
         var root = document.RootElement;
@@ -196,6 +193,6 @@ public sealed class AnnotationController : ControllerBase
             }
         }
 
-        return store.SaveAnnotationSet(userId, new AnnotationSaveRequest(fileId, width, height, items));
+        return new AnnotationSaveRequest(fileId, width, height, items);
     }
 }
