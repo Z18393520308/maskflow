@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using MaskFlow.Api.Infrastructure.Security;
 using Microsoft.AspNetCore.Mvc;
 
 [Tags("Annotation")]
@@ -8,11 +9,13 @@ public sealed class AnnotationController : ControllerBase
 {
     private readonly MaskFlowStore store;
     private readonly IHttpClientFactory clientFactory;
+    private readonly SamInferenceGate samGate;
 
-    public AnnotationController(MaskFlowStore store, IHttpClientFactory clientFactory)
+    public AnnotationController(MaskFlowStore store, IHttpClientFactory clientFactory, SamInferenceGate samGate)
     {
         this.store = store;
         this.clientFactory = clientFactory;
+        this.samGate = samGate;
     }
 
     [HttpPost("/api/annotations/auto")]
@@ -30,6 +33,12 @@ public sealed class AnnotationController : ControllerBase
 
         var file = store.State.Files.FirstOrDefault(x => x.Id == request.FileId && x.UserId == user.Id);
         if (file is null || !await store.StoredObjectExistsAsync(file.Path)) return NotFound(new { detail = "File not found." });
+
+        await using var slot = await samGate.TryAcquireAsync(HttpContext.RequestAborted);
+        if (slot is null)
+        {
+            return StatusCode(StatusCodes.Status429TooManyRequests, new { detail = "Too many concurrent AI requests. Try again shortly." });
+        }
 
         using var content = new MultipartFormDataContent();
         await using var stream = await store.OpenStoredObjectAsync(file.Path);
@@ -113,6 +122,24 @@ public sealed class AnnotationController : ControllerBase
         if (!Request.HasFormContentType) return BadRequest(new { detail = "Multipart form data is required." });
         var form = await Request.ReadFormAsync();
         if (form.Files.Count == 0) return BadRequest(new { detail = "Image file is required." });
+
+        foreach (var file in form.Files)
+        {
+            try
+            {
+                await UploadValidator.ValidateImageAsync(file, HttpContext.RequestAborted);
+            }
+            catch (BadHttpRequestException ex)
+            {
+                return StatusCode(ex.StatusCode, new { detail = ex.Message });
+            }
+        }
+
+        await using var slot = await samGate.TryAcquireAsync(HttpContext.RequestAborted);
+        if (slot is null)
+        {
+            return StatusCode(StatusCodes.Status429TooManyRequests, new { detail = "Too many concurrent AI requests. Try again shortly." });
+        }
 
         using var content = new MultipartFormDataContent();
         foreach (var field in form)

@@ -120,12 +120,24 @@ npm run dev -- --host 127.0.0.1 --port 3010
 ```powershell
 cd src\ai\sam-inference
 pip install -r requirements.txt
+# 可选：与 API 共用内部密钥（本地不设则 SAM /api/* 不鉴权）
+# $env:SAM3_INTERNAL_KEY = "your-local-dev-key"
+# $env:SAM3_REQUIRE_INTERNAL_KEY = "true"
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
 
 需确保 `资源/模型/sam3.pt` 已就位，且本机有可用的 CUDA GPU。
 
+本地开发若设置了 `SAM3_INTERNAL_KEY`，请在启动 API 时使用相同值；若启用 `SAM3_REQUIRE_INTERNAL_KEY=true`，则 SAM 服务必须配置该密钥。
+
 ## Docker 部署
+
+复制环境变量模板并修改所有密钥（至少 16 字符，勿使用 `maskflow-*-dev-key` 默认值）：
+
+```powershell
+copy .env.example .env
+# 编辑 .env 中的 SAM3_INTERNAL_KEY、MASKFLOW_ADMIN_API_KEY、MYSQL_*、MINIO_* 等
+```
 
 确保 `资源/模型/sam3.pt` 已下载，然后在项目根目录执行：
 

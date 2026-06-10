@@ -10,6 +10,7 @@ public static class DependencyInjection
         services.AddSingleton<IMaskFlowRepository, MySqlMaskFlowRepository>();
         services.AddSingleton<MaskFlowStore>();
         services.AddSingleton<LoginRateLimiter>();
+        services.AddSingleton<SamInferenceGate>();
         return services;
     }
 }

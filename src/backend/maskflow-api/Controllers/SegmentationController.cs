@@ -1,5 +1,5 @@
 using System.Net.Http.Headers;
-using Microsoft.AspNetCore.Authorization;
+using MaskFlow.Api.Infrastructure.Security;
 using Microsoft.AspNetCore.Mvc;
 
 [Tags("Segmentation")]
@@ -7,17 +7,19 @@ public sealed class SegmentationController : ControllerBase
 {
     private readonly MaskFlowStore store;
     private readonly IHttpClientFactory clientFactory;
+    private readonly SamInferenceGate samGate;
 
-    public SegmentationController(MaskFlowStore store, IHttpClientFactory clientFactory)
+    public SegmentationController(MaskFlowStore store, IHttpClientFactory clientFactory, SamInferenceGate samGate)
     {
         this.store = store;
         this.clientFactory = clientFactory;
+        this.samGate = samGate;
     }
 
-    [AllowAnonymous]
     [HttpGet("/api/segment/status")]
     public async Task<IActionResult> Status()
     {
+        store.RequireUser(HttpContext);
         return await ForwardGetAsync("/api/status");
     }
 
@@ -32,6 +34,12 @@ public sealed class SegmentationController : ControllerBase
         catch (BadHttpRequestException ex)
         {
             return StatusCode(ex.StatusCode, new { detail = ex.Message });
+        }
+
+        await using var slot = await samGate.TryAcquireAsync(HttpContext.RequestAborted);
+        if (slot is null)
+        {
+            return StatusCode(StatusCodes.Status429TooManyRequests, new { detail = "Too many concurrent AI requests. Try again shortly." });
         }
 
         var result = await ForwardMultipartAsync("/api/segment");
@@ -62,6 +70,18 @@ public sealed class SegmentationController : ControllerBase
         if (!Request.HasFormContentType) return (BadRequest(new { detail = "Multipart form data is required." }), false);
         var form = await Request.ReadFormAsync();
         if (form.Files.Count == 0) return (BadRequest(new { detail = "Image file is required." }), false);
+
+        foreach (var file in form.Files)
+        {
+            try
+            {
+                await UploadValidator.ValidateImageAsync(file, HttpContext.RequestAborted);
+            }
+            catch (BadHttpRequestException ex)
+            {
+                return (StatusCode(ex.StatusCode, new { detail = ex.Message }), false);
+            }
+        }
 
         using var content = new MultipartFormDataContent();
         foreach (var field in form)

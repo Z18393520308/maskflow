@@ -72,6 +72,23 @@ public sealed class MaskFlowStore
         }
     }
 
+    public async Task<T> MutateAsync<T>(Func<MaskFlowState, T> mutate)
+    {
+        T? result = default;
+        await SaveAsync(() => result = mutate(State));
+        return result!;
+    }
+
+    public async Task<T> MutateAsync<T>(Func<MaskFlowState, Task<T>> mutate)
+    {
+        T? result = default;
+        await SaveAsync(async () => result = await mutate(State));
+        return result!;
+    }
+
+    public Task MutateAsync(Func<MaskFlowState, Task> mutate) =>
+        SaveAsync(async () => await mutate(State));
+
     AmazonS3Client CreateS3Client()
     {
         var config = new AmazonS3Config
@@ -120,16 +137,15 @@ public sealed class MaskFlowStore
     public async Task<AuthResult?> LoginAsync(string email, string password, HttpContext context)
     {
         var normalizedEmail = email.Trim().ToLowerInvariant();
-        var user = State.Users.FirstOrDefault(x => x.Email == normalizedEmail);
-        if (user is null || !VerifyPassword(password, user.PasswordHash, user.Salt))
-        {
-            return null;
-        }
-
         AuthResult? result = null;
         await SaveAsync(() =>
         {
-            var current = State.Users.First(x => x.Id == user.Id);
+            var current = State.Users.FirstOrDefault(x => x.Email == normalizedEmail);
+            if (current is null || !VerifyPassword(password, current.PasswordHash, current.Salt))
+            {
+                return;
+            }
+
             var deviceId = "dev_" + Util.Id();
             State.Devices.Add(new AccountDevice(deviceId, current.Id, "Current browser", context.Connection.RemoteIpAddress?.ToString(), context.Request.Headers.UserAgent.ToString(), DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
             var token = CreateSession(current.Id, deviceId);
@@ -180,13 +196,13 @@ public sealed class MaskFlowStore
     }
     public PublicUser PublicUser(User user) => new(user.Id, user.Email, user.Username ?? "MaskFlow User", user.Phone ?? "", user.AvatarPath is null ? null : "/api/account/avatar", user.Plan, user.QuotaBytes, user.UsedBytes, Math.Max(0, user.QuotaBytes - user.UsedBytes));
 
-    public async Task UpdateProfileAsync(int userId, ProfileRequest request)
-    {
-        var user = GetUser(userId)!;
-        State.Users.Remove(user);
-        State.Users.Add(user with { Username = request.Username ?? user.Username, Phone = request.Phone ?? user.Phone });
-        await SaveAsync();
-    }
+    public Task UpdateProfileAsync(int userId, ProfileRequest request) =>
+        SaveAsync(() =>
+        {
+            var user = GetUser(userId)!;
+            State.Users.Remove(user);
+            State.Users.Add(user with { Username = request.Username ?? user.Username, Phone = request.Phone ?? user.Phone });
+        });
 
     public async Task<bool> ChangePasswordAsync(int userId, string currentPassword, string newPassword, string? keepSessionToken = null)
     {
@@ -230,24 +246,36 @@ public sealed class MaskFlowStore
         }
     }
 
-    public async Task UpdatePlanAsync(int userId, string plan)
-    {
-        var limit = ResolveDailyLimit(plan);
-        var quota = plan switch { "pro" => 50L * 1024 * 1024 * 1024, "team" => 500L * 1024 * 1024 * 1024, _ => 10L * 1024 * 1024 * 1024 };
-        var user = GetUser(userId)!;
-        State.Users.Remove(user);
-        State.Users.Add(user with { Plan = plan, QuotaBytes = quota });
-        State.Quotas[userId.ToString()] = new AiQuota(plan, limit, 0, DateOnly.FromDateTime(DateTime.UtcNow));
-        await SaveAsync();
-    }
+    public Task UpdatePlanAsync(int userId, string plan) =>
+        SaveAsync(() =>
+        {
+            var limit = ResolveDailyLimit(plan);
+            var quotaBytes = plan switch { "pro" => 50L * 1024 * 1024 * 1024, "team" => 500L * 1024 * 1024 * 1024, _ => 10L * 1024 * 1024 * 1024 };
+            var user = GetUser(userId)!;
+            State.Users.Remove(user);
+            State.Users.Add(user with { Plan = plan, QuotaBytes = quotaBytes });
+            State.Quotas[userId.ToString()] = new AiQuota(plan, limit, 0, DateOnly.FromDateTime(DateTime.UtcNow));
+        });
 
     public AiQuota GetQuota(User user) => RefreshQuota(user).quota;
 
     public async Task<AiQuota> GetQuotaAsync(User user)
     {
-        var (quota, changed) = RefreshQuota(user);
-        if (changed) await SaveAsync();
-        return quota;
+        await gate.WaitAsync();
+        try
+        {
+            var (quota, changed) = RefreshQuota(user);
+            if (changed)
+            {
+                await repository.SaveAsync(State);
+            }
+
+            return quota;
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     (AiQuota quota, bool changed) RefreshQuota(User user)
@@ -285,23 +313,39 @@ public sealed class MaskFlowStore
 
     public async Task<FileItem> SaveUploadAsync(User user, IFormFile upload, string? projectId)
     {
-        projectId = string.IsNullOrWhiteSpace(projectId) ? null : projectId;
-        if (projectId is not null && !State.Projects.Any(x => x.Id == projectId && x.UserId == user.Id))
-        {
-            throw new BadHttpRequestException("Project not found.", 404);
-        }
+        await UploadValidator.ValidateImageAsync(upload);
 
-        if (user.UsedBytes + upload.Length > user.QuotaBytes)
+        FileItem? item = null;
+        await SaveAsync(async () =>
         {
-            throw new BadHttpRequestException("Storage quota exceeded.", 403);
-        }
+            projectId = string.IsNullOrWhiteSpace(projectId) ? null : projectId;
+            if (projectId is not null && !State.Projects.Any(x => x.Id == projectId && x.UserId == user.Id))
+            {
+                throw new BadHttpRequestException("Project not found.", 404);
+            }
 
-        var safeName = Path.GetFileName(upload.FileName);
+            var currentUser = GetUser(user.Id)!;
+            if (currentUser.UsedBytes + upload.Length > currentUser.QuotaBytes)
+            {
+                throw new BadHttpRequestException("Storage quota exceeded.", 403);
+            }
+
+            var safeName = Path.GetFileName(upload.FileName);
+            var path = await PersistUploadAsync(upload, user.Id, projectId, safeName);
+            var fileId = State.NextFileId++;
+            item = new FileItem(fileId, currentUser.Id, projectId, safeName, path, upload.Length, "image", upload.ContentType, DateTimeOffset.UtcNow, $"/api/files/{fileId}/download");
+            State.Files.Add(item);
+            ReplaceUser(currentUser with { UsedBytes = currentUser.UsedBytes + upload.Length });
+        });
+        return item!;
+    }
+
+    async Task<string> PersistUploadAsync(IFormFile upload, int userId, string? projectId, string safeName)
+    {
         var prefix = projectId is not null
-            ? $"users/{user.Id}/projects/{projectId}/uploads"
-            : $"users/{user.Id}/uploads";
+            ? $"users/{userId}/projects/{projectId}/uploads"
+            : $"users/{userId}/uploads";
         var objectKey = $"{prefix}/{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}_{Util.Id()}_{safeName}";
-        string path;
         if (UseMinio)
         {
             using var client = CreateS3Client();
@@ -313,80 +357,91 @@ public sealed class MaskFlowStore
                 InputStream = stream,
                 ContentType = upload.ContentType ?? "application/octet-stream"
             });
-            path = $"minio://{MinioBucket}/{objectKey}";
+            return $"minio://{MinioBucket}/{objectKey}";
         }
-        else
-        {
-            var userDir = projectId is not null
-                ? Path.Combine(StorageRoot, user.Id.ToString(), "projects", projectId)
-                : Path.Combine(StorageRoot, user.Id.ToString());
-            Directory.CreateDirectory(userDir);
-            path = Path.Combine(userDir, $"{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}_{safeName}");
-            await using var target = File.Create(path);
-            await upload.CopyToAsync(target);
-        }
-        var item = new FileItem(State.NextFileId++, user.Id, projectId, safeName, path, upload.Length, "image", upload.ContentType, DateTimeOffset.UtcNow, $"/api/files/{State.NextFileId - 1}/download");
-        State.Files.Add(item);
-        ReplaceUser(user with { UsedBytes = user.UsedBytes + upload.Length });
-        await SaveAsync();
-        return item;
+
+        var userDir = projectId is not null
+            ? Path.Combine(StorageRoot, userId.ToString(), "projects", projectId)
+            : Path.Combine(StorageRoot, userId.ToString());
+        Directory.CreateDirectory(userDir);
+        var path = Path.Combine(userDir, $"{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}_{safeName}");
+        await using var target = File.Create(path);
+        await upload.CopyToAsync(target);
+        return path;
     }
 
     public async Task<Project> CreateProjectAsync(int userId, ProjectCreate request)
     {
-        var project = new Project("proj_" + Util.Id(), userId, request.Name, request.Description ?? "", request.DataType ?? "detection",
-            request.Split ?? new SplitConfig(70, 20, 10), 0, 0, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
-        State.Projects.Add(project);
-        State.ProjectLabels[project.Id] = ["object"];
-        await SaveAsync();
-        return project;
+        Project? project = null;
+        await SaveAsync(() =>
+        {
+            project = new Project("proj_" + Util.Id(), userId, request.Name, request.Description ?? "", request.DataType ?? "detection",
+                request.Split ?? new SplitConfig(70, 20, 10), 0, 0, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+            State.Projects.Add(project);
+            State.ProjectLabels[project.Id] = ["object"];
+        });
+        return project!;
     }
 
     public async Task<Project?> UpdateProjectAsync(int userId, string projectId, ProjectCreate request)
     {
-        var project = State.Projects.FirstOrDefault(x => x.Id == projectId && x.UserId == userId);
-        if (project is null) return null;
-        State.Projects.Remove(project);
-        var updated = project with
+        Project? updated = null;
+        await SaveAsync(() =>
         {
-            Name = request.Name,
-            Description = request.Description ?? project.Description,
-            DataType = request.DataType ?? project.DataType,
-            Split = request.Split ?? project.Split,
-            UpdatedAt = DateTimeOffset.UtcNow
-        };
-        State.Projects.Add(updated);
-        await SaveAsync();
+            var project = State.Projects.FirstOrDefault(x => x.Id == projectId && x.UserId == userId);
+            if (project is null)
+            {
+                return;
+            }
+
+            State.Projects.Remove(project);
+            updated = project with
+            {
+                Name = request.Name,
+                Description = request.Description ?? project.Description,
+                DataType = request.DataType ?? project.DataType,
+                Split = request.Split ?? project.Split,
+                UpdatedAt = DateTimeOffset.UtcNow
+            };
+            State.Projects.Add(updated);
+        });
         return updated;
     }
 
     public async Task<bool> DeleteProjectAsync(int userId, string projectId)
     {
-        var project = State.Projects.FirstOrDefault(x => x.Id == projectId && x.UserId == userId);
-        if (project is null) return false;
-
-        var fileIds = State.Files.Where(x => x.UserId == userId && x.ProjectId == projectId).Select(x => x.Id).ToList();
-        foreach (var fileId in fileIds)
+        var deleted = false;
+        await SaveAsync(async () =>
         {
-            await DeleteFileCoreAsync(userId, fileId);
-        }
+            var project = State.Projects.FirstOrDefault(x => x.Id == projectId && x.UserId == userId);
+            if (project is null)
+            {
+                return;
+            }
 
-        State.Tasks.RemoveAll(x => x.UserId == userId && x.ProjectId == projectId);
-        State.Exports.RemoveAll(x => x.UserId == userId && x.ProjectId == projectId);
-        State.ProjectLabels.Remove(projectId);
-        State.Projects.Remove(project);
-        await SaveAsync();
-        return true;
+            var fileIds = State.Files.Where(x => x.UserId == userId && x.ProjectId == projectId).Select(x => x.Id).ToList();
+            foreach (var fileId in fileIds)
+            {
+                await DeleteFileCoreLockedAsync(userId, fileId);
+            }
+
+            State.Tasks.RemoveAll(x => x.UserId == userId && x.ProjectId == projectId);
+            State.Exports.RemoveAll(x => x.UserId == userId && x.ProjectId == projectId);
+            State.ProjectLabels.Remove(projectId);
+            State.Projects.Remove(project);
+            deleted = true;
+        });
+        return deleted;
     }
 
     public async Task<bool> DeleteFileAsync(int userId, int fileId)
     {
-        if (!await DeleteFileCoreAsync(userId, fileId)) return false;
-        await SaveAsync();
-        return true;
+        var deleted = false;
+        await SaveAsync(async () => deleted = await DeleteFileCoreLockedAsync(userId, fileId));
+        return deleted;
     }
 
-    async Task<bool> DeleteFileCoreAsync(int userId, int fileId)
+    async Task<bool> DeleteFileCoreLockedAsync(int userId, int fileId)
     {
         var file = State.Files.FirstOrDefault(x => x.Id == fileId && x.UserId == userId);
         if (file is null) return false;
@@ -405,9 +460,9 @@ public sealed class MaskFlowStore
 
     public async Task<AnnotationSet> SaveAnnotationSetAsync(int userId, AnnotationSaveRequest request)
     {
-        var set = ApplyAnnotationSet(userId, request);
-        await SaveAsync();
-        return set;
+        AnnotationSet? set = null;
+        await SaveAsync(() => set = ApplyAnnotationSet(userId, request));
+        return set!;
     }
 
     AnnotationSet ApplyAnnotationSet(int userId, AnnotationSaveRequest request)
@@ -478,9 +533,9 @@ public sealed class MaskFlowStore
 
     public async Task<List<string>> SaveProjectLabelsAsync(int userId, string projectId, IEnumerable<string>? labels)
     {
-        var cleaned = ApplyProjectLabels(userId, projectId, labels);
-        await SaveAsync();
-        return cleaned;
+        List<string>? cleaned = null;
+        await SaveAsync(() => cleaned = ApplyProjectLabels(userId, projectId, labels));
+        return cleaned!;
     }
 
     List<string> ApplyProjectLabels(int userId, string projectId, IEnumerable<string>? labels)
@@ -499,47 +554,72 @@ public sealed class MaskFlowStore
 
     public async Task<NotificationSettings> UpdateNotificationSettingsAsync(int userId, NotificationSettings request)
     {
-        var settings = request with { UpdatedAt = DateTimeOffset.UtcNow };
-        State.NotificationSettings[userId.ToString()] = settings;
-        await SaveAsync();
-        return settings;
+        NotificationSettings? settings = null;
+        await SaveAsync(() =>
+        {
+            settings = request with { UpdatedAt = DateTimeOffset.UtcNow };
+            State.NotificationSettings[userId.ToString()] = settings;
+        });
+        return settings!;
     }
 
     public async Task<(ApiToken Token, string PlainValue)> CreateApiTokenAsync(int userId, string name)
     {
         var plain = "mf_" + Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
-        var token = new ApiToken("tok_" + Util.Id(), userId, name, Util.Sha256(plain), plain[..8], DateTimeOffset.UtcNow, null, null);
-        State.ApiTokens.Add(token);
-        await SaveAsync();
-        return (token, plain);
+        ApiToken? token = null;
+        await SaveAsync(() =>
+        {
+            token = new ApiToken("tok_" + Util.Id(), userId, name, Util.Sha256(plain), plain[..8], DateTimeOffset.UtcNow, null, null);
+            State.ApiTokens.Add(token);
+        });
+        return (token!, plain);
     }
 
     public async Task<bool> RevokeApiTokenAsync(int userId, string tokenId)
     {
-        var token = State.ApiTokens.FirstOrDefault(x => x.Id == tokenId && x.UserId == userId);
-        if (token is null) return false;
-        State.ApiTokens.Remove(token);
-        State.ApiTokens.Add(token with { RevokedAt = DateTimeOffset.UtcNow });
-        await SaveAsync();
-        return true;
+        var revoked = false;
+        await SaveAsync(() =>
+        {
+            var token = State.ApiTokens.FirstOrDefault(x => x.Id == tokenId && x.UserId == userId);
+            if (token is null)
+            {
+                return;
+            }
+
+            State.ApiTokens.Remove(token);
+            State.ApiTokens.Add(token with { RevokedAt = DateTimeOffset.UtcNow });
+            revoked = true;
+        });
+        return revoked;
     }
 
     public async Task<TeamMember> AddTeamMemberAsync(int userId, TeamMemberCreate request)
     {
-        var member = new TeamMember("mem_" + Util.Id(), userId, request.Email, request.Role, "invited", DateTimeOffset.UtcNow);
-        State.TeamMembers.Add(member);
-        await SaveAsync();
-        return member;
+        TeamMember? member = null;
+        await SaveAsync(() =>
+        {
+            member = new TeamMember("mem_" + Util.Id(), userId, request.Email, request.Role, "invited", DateTimeOffset.UtcNow);
+            State.TeamMembers.Add(member);
+        });
+        return member!;
     }
 
     public async Task<bool> RemoveTeamMemberAsync(int userId, string memberId)
     {
-        var member = State.TeamMembers.FirstOrDefault(x => x.Id == memberId && x.UserId == userId);
-        if (member is null) return false;
-        if (member.Role == "owner") throw new BadHttpRequestException("Owner cannot be removed.", 400);
-        State.TeamMembers.Remove(member);
-        await SaveAsync();
-        return true;
+        var removed = false;
+        await SaveAsync(() =>
+        {
+            var member = State.TeamMembers.FirstOrDefault(x => x.Id == memberId && x.UserId == userId);
+            if (member is null)
+            {
+                return;
+            }
+
+            if (member.Role == "owner") throw new BadHttpRequestException("Owner cannot be removed.", 400);
+            State.TeamMembers.Remove(member);
+            removed = true;
+        });
+        return removed;
     }
 
     public async Task<AccountDevice?> RevokeDeviceAsync(int userId, string deviceId)
@@ -563,43 +643,58 @@ public sealed class MaskFlowStore
 
     public async Task<Node> RegisterNodeAsync(NodeRegister request, string apiKey)
     {
-        var node = new Node("node_" + Util.Id(), request.OwnerId, request.Pool, "pending", request.GpuModel, request.VramGb, request.Region, request.PricePerHour, 0, Util.Sha256(apiKey), DateTimeOffset.UtcNow, null, null);
-        State.Nodes.Add(node);
-        await SaveAsync();
-        return node;
+        Node? node = null;
+        await SaveAsync(() =>
+        {
+            node = new Node("node_" + Util.Id(), request.OwnerId, request.Pool, "pending", request.GpuModel, request.VramGb, request.Region, request.PricePerHour, 0, Util.Sha256(apiKey), DateTimeOffset.UtcNow, null, null);
+            State.Nodes.Add(node);
+        });
+        return node!;
     }
 
     public async Task<Job> AddJobAsync(JobCreate request)
     {
-        var job = new Job("job_" + Util.Id(), "maskflow", request.Type, request.UserId, request.ProjectId, "platform-gpu", "normal", "queued",
-            new Dictionary<string, object?> { ["gpu"] = 1 }, request.Input, null, request.Params, null, null, null, null, DateTimeOffset.UtcNow, null, null);
-        State.Jobs.Add(job);
-        await SaveAsync();
-        return job;
+        Job? job = null;
+        await SaveAsync(() =>
+        {
+            job = new Job("job_" + Util.Id(), "maskflow", request.Type, request.UserId, request.ProjectId, "platform-gpu", "normal", "queued",
+                new Dictionary<string, object?> { ["gpu"] = 1 }, request.Input, null, request.Params, null, null, null, null, DateTimeOffset.UtcNow, null, null);
+            State.Jobs.Add(job);
+        });
+        return job!;
     }
 
     public async Task<Pool> AddPoolAsync(PoolCreate request)
     {
-        var pool = new Pool(request.Id ?? "pool_" + Util.Id(), request.Name, request.Type, request.Region, "active", request.Capacity, request.Policy, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
-        State.Pools.Add(pool);
-        await SaveAsync();
-        return pool;
+        Pool? pool = null;
+        await SaveAsync(() =>
+        {
+            pool = new Pool(request.Id ?? "pool_" + Util.Id(), request.Name, request.Type, request.Region, "active", request.Capacity, request.Policy, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+            State.Pools.Add(pool);
+        });
+        return pool!;
     }
 
     public async Task<PricingRule> AddPricingRuleAsync(PricingCreate request)
     {
-        var rule = new PricingRule("price_" + Util.Id(), request.Name, request.ResourceType, request.Pool, request.Region, request.UnitPrice, request.BillingUnit, request.Status, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
-        State.PricingRules.Add(rule);
-        await SaveAsync();
-        return rule;
+        PricingRule? rule = null;
+        await SaveAsync(() =>
+        {
+            rule = new PricingRule("price_" + Util.Id(), request.Name, request.ResourceType, request.Pool, request.Region, request.UnitPrice, request.BillingUnit, request.Status, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+            State.PricingRules.Add(rule);
+        });
+        return rule!;
     }
 
     public async Task<Settlement> AddSettlementAsync(SettlementCreate request)
     {
-        var settlement = new Settlement("settle_" + Util.Id(), request.ProviderId, request.Period, request.NodeCount, request.GrossAmount, request.PlatformFee, request.GrossAmount - request.PlatformFee, request.Status, DateTimeOffset.UtcNow, null);
-        State.Settlements.Add(settlement);
-        await SaveAsync();
-        return settlement;
+        Settlement? settlement = null;
+        await SaveAsync(() =>
+        {
+            settlement = new Settlement("settle_" + Util.Id(), request.ProviderId, request.Period, request.NodeCount, request.GrossAmount, request.PlatformFee, request.GrossAmount - request.PlatformFee, request.Status, DateTimeOffset.UtcNow, null);
+            State.Settlements.Add(settlement);
+        });
+        return settlement!;
     }
 
     public static List<AnnotationItem> NormalizeAnnotations(List<AnnotationItem>? annotations, IReadOnlyList<string>? projectLabels = null)
@@ -660,97 +755,102 @@ public sealed class MaskFlowStore
             throw new BadHttpRequestException("Split ratios must sum to 100.", 400);
         }
 
-        var exportId = "export_" + Util.Id();
-        var exportDir = Path.Combine(StorageRoot, userId.ToString(), "exports");
-        Directory.CreateDirectory(exportDir);
-        var zipPath = Path.Combine(exportDir, $"{exportId}.zip");
-        var files = State.Files
-            .Where(x => x.UserId == userId && x.Kind == "image" && (request.ProjectId is null || x.ProjectId == request.ProjectId))
-            .OrderBy(x => x.CreatedAt)
-            .ToList();
-        var fileIds = files.Select(x => x.Id).ToHashSet();
-        var annotationMap = State.AnnotationSets.Where(x => x.UserId == userId && fileIds.Contains(x.FileId)).ToDictionary(x => x.FileId);
-        var labeledFiles = files.Where(x => annotationMap.ContainsKey(x.Id)).ToList();
-        if (labeledFiles.Count == 0)
+        DatasetExport? export = null;
+        await SaveAsync(async () =>
         {
-            throw new BadHttpRequestException("No annotated images found for export.", 400);
-        }
-
-        using (var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
-        {
-            var labels = request.ProjectId is not null && State.ProjectLabels.TryGetValue(request.ProjectId, out var projectLabels)
-                ? projectLabels.ToList()
-                : annotationMap.Values
-                .SelectMany(x => x.Annotations)
-                .Select(x => x.Label)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(x => x)
+            var exportId = "export_" + Util.Id();
+            var exportDir = Path.Combine(StorageRoot, userId.ToString(), "exports");
+            Directory.CreateDirectory(exportDir);
+            var zipPath = Path.Combine(exportDir, $"{exportId}.zip");
+            var files = State.Files
+                .Where(x => x.UserId == userId && x.Kind == "image" && (request.ProjectId is null || x.ProjectId == request.ProjectId))
+                .OrderBy(x => x.CreatedAt)
                 .ToList();
-            if (labels.Count == 0) labels.Add("object");
-
-            for (var index = 0; index < labeledFiles.Count; index++)
+            var fileIds = files.Select(x => x.Id).ToHashSet();
+            var annotationMap = State.AnnotationSets.Where(x => x.UserId == userId && fileIds.Contains(x.FileId)).ToDictionary(x => x.FileId);
+            var labeledFiles = files.Where(x => annotationMap.ContainsKey(x.Id)).ToList();
+            if (labeledFiles.Count == 0)
             {
-                var file = labeledFiles[index];
-                var targetSplit = SplitName(index, labeledFiles.Count, split);
-                var extension = Path.GetExtension(file.Name);
-                var stem = SanitizeFileName($"{file.Id}_{Path.GetFileNameWithoutExtension(file.Name)}");
-                var imageEntry = archive.CreateEntry($"images/{targetSplit}/{stem}{extension}");
-                await using (var imageEntryStream = imageEntry.Open())
-                await using (var imageStream = await OpenStoredObjectAsync(file.Path))
+                throw new BadHttpRequestException("No annotated images found for export.", 400);
+            }
+
+            using (var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
+            {
+                var labels = request.ProjectId is not null && State.ProjectLabels.TryGetValue(request.ProjectId, out var projectLabels)
+                    ? projectLabels.ToList()
+                    : annotationMap.Values
+                    .SelectMany(x => x.Annotations)
+                    .Select(x => x.Label)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(x => x)
+                    .ToList();
+                if (labels.Count == 0) labels.Add("object");
+
+                for (var index = 0; index < labeledFiles.Count; index++)
                 {
-                    await imageStream.CopyToAsync(imageEntryStream);
+                    var file = labeledFiles[index];
+                    var targetSplit = SplitName(index, labeledFiles.Count, split);
+                    var extension = Path.GetExtension(file.Name);
+                    var stem = SanitizeFileName($"{file.Id}_{Path.GetFileNameWithoutExtension(file.Name)}");
+                    var imageEntry = archive.CreateEntry($"images/{targetSplit}/{stem}{extension}");
+                    await using (var imageEntryStream = imageEntry.Open())
+                    await using (var imageStream = await OpenStoredObjectAsync(file.Path))
+                    {
+                        await imageStream.CopyToAsync(imageEntryStream);
+                    }
+
+                    var labelEntry = archive.CreateEntry($"labels/{targetSplit}/{stem}.txt");
+                    using var labelWriter = new StreamWriter(labelEntry.Open());
+                    labelWriter.Write(annotationMap[file.Id].YoloTxt);
                 }
 
-                var labelEntry = archive.CreateEntry($"labels/{targetSplit}/{stem}.txt");
-                using var labelWriter = new StreamWriter(labelEntry.Open());
-                labelWriter.Write(annotationMap[file.Id].YoloTxt);
-            }
-
-            var dataEntry = archive.CreateEntry("data.yaml");
-            using (var writer = new StreamWriter(dataEntry.Open()))
-            {
-                writer.WriteLine("path: .");
-                writer.WriteLine("train: images/train");
-                writer.WriteLine("val: images/val");
-                writer.WriteLine("test: images/test");
-                writer.WriteLine($"nc: {labels.Count}");
-                writer.WriteLine("names:");
-                for (var i = 0; i < labels.Count; i++)
+                var dataEntry = archive.CreateEntry("data.yaml");
+                using (var writer = new StreamWriter(dataEntry.Open()))
                 {
-                    writer.WriteLine($"  {i}: {labels[i]}");
+                    writer.WriteLine("path: .");
+                    writer.WriteLine("train: images/train");
+                    writer.WriteLine("val: images/val");
+                    writer.WriteLine("test: images/test");
+                    writer.WriteLine($"nc: {labels.Count}");
+                    writer.WriteLine("names:");
+                    for (var i = 0; i < labels.Count; i++)
+                    {
+                        writer.WriteLine($"  {i}: {labels[i]}");
+                    }
                 }
+
+                var readme = archive.CreateEntry("README.md");
+                using var readmeWriter = new StreamWriter(readme.Open());
+                readmeWriter.WriteLine("# MaskFlow YOLO Dataset");
+                readmeWriter.WriteLine();
+                readmeWriter.WriteLine($"Images: {labeledFiles.Count}");
+                readmeWriter.WriteLine($"GeneratedAt: {DateTimeOffset.UtcNow:O}");
             }
 
-            var readme = archive.CreateEntry("README.md");
-            using var readmeWriter = new StreamWriter(readme.Open());
-            readmeWriter.WriteLine("# MaskFlow YOLO Dataset");
-            readmeWriter.WriteLine();
-            readmeWriter.WriteLine($"Images: {labeledFiles.Count}");
-            readmeWriter.WriteLine($"GeneratedAt: {DateTimeOffset.UtcNow:O}");
-        }
-        var zipSize = new FileInfo(zipPath).Length;
-        var exportPath = zipPath;
-        if (UseMinio)
-        {
-            var exportKey = $"users/{userId}/exports/{exportId}.zip";
-            using (var client = CreateS3Client())
-            await using (var zipStream = File.OpenRead(zipPath))
+            var zipSize = new FileInfo(zipPath).Length;
+            var exportPath = zipPath;
+            if (UseMinio)
             {
-                await client.PutObjectAsync(new PutObjectRequest
+                var exportKey = $"users/{userId}/exports/{exportId}.zip";
+                using (var client = CreateS3Client())
+                await using (var zipStream = File.OpenRead(zipPath))
                 {
-                    BucketName = MinioBucket,
-                    Key = exportKey,
-                    InputStream = zipStream,
-                    ContentType = "application/zip"
-                });
+                    await client.PutObjectAsync(new PutObjectRequest
+                    {
+                        BucketName = MinioBucket,
+                        Key = exportKey,
+                        InputStream = zipStream,
+                        ContentType = "application/zip"
+                    });
+                }
+                exportPath = $"minio://{MinioBucket}/{exportKey}";
+                File.Delete(zipPath);
             }
-            exportPath = $"minio://{MinioBucket}/{exportKey}";
-            File.Delete(zipPath);
-        }
-        var export = new DatasetExport(exportId, userId, request.ProjectId, request.TaskId, "completed", exportPath, zipSize, request, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, $"/api/export/{exportId}/download");
-        State.Exports.Add(export);
-        await SaveAsync();
-        return export;
+
+            export = new DatasetExport(exportId, userId, request.ProjectId, request.TaskId, "completed", exportPath, zipSize, request, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, $"/api/export/{exportId}/download");
+            State.Exports.Add(export);
+        });
+        return export!;
     }
 
     public async Task<Stream> OpenStoredObjectAsync(string path)
@@ -810,69 +910,119 @@ public sealed class MaskFlowStore
         return (withoutScheme[..slash], withoutScheme[(slash + 1)..]);
     }
 
-    public Task<IResult> SetJobStatusAsync(string jobId, string status)
+    public async Task<IResult> SetJobStatusAsync(string jobId, string status)
     {
-        var job = State.Jobs.FirstOrDefault(x => x.Id == jobId);
-        if (job is null) return Task.FromResult<IResult>(Results.NotFound(new { detail = "Job not found" }));
-        State.Jobs.Remove(job);
-        State.Jobs.Add(job with { Status = status, FinishedAt = status is "cancelled" or "succeeded" or "failed" ? DateTimeOffset.UtcNow : null });
-        SaveAsync().GetAwaiter().GetResult();
-        return Task.FromResult<IResult>(Results.Json(new { job = State.Jobs.First(x => x.Id == jobId) }));
-    }
-
-    public Task<object?> AddJobEventAsync(string jobId, JobEventCreate request)
-    {
-        var job = State.Jobs.FirstOrDefault(x => x.Id == jobId);
-        if (job is null) return Task.FromResult<object?>(null);
-        var ev = new JobEvent(State.NextEventId++, jobId, request.EventType, request.Payload, DateTimeOffset.UtcNow);
-        State.JobEvents.Add(ev);
-        if (!string.IsNullOrWhiteSpace(request.Status))
+        IResult? result = null;
+        await SaveAsync(() =>
         {
+            var job = State.Jobs.FirstOrDefault(x => x.Id == jobId);
+            if (job is null)
+            {
+                result = Results.NotFound(new { detail = "Job not found" });
+                return;
+            }
+
             State.Jobs.Remove(job);
-            State.Jobs.Add(job with { Status = request.Status, Error = request.Error ?? job.Error, FinishedAt = request.Status is "succeeded" or "failed" or "cancelled" ? DateTimeOffset.UtcNow : null });
-        }
-        SaveAsync().GetAwaiter().GetResult();
-        return Task.FromResult<object?>(new { @event = ev, job = State.Jobs.First(x => x.Id == jobId) });
+            State.Jobs.Add(job with { Status = status, FinishedAt = status is "cancelled" or "succeeded" or "failed" ? DateTimeOffset.UtcNow : null });
+            result = Results.Json(new { job = State.Jobs.First(x => x.Id == jobId) });
+        });
+        return result!;
     }
 
-    public Task<IResult> HeartbeatNodeAsync(string nodeId, NodeHeartbeat request)
+    public async Task<object?> AddJobEventAsync(string jobId, JobEventCreate request)
     {
-        var node = State.Nodes.FirstOrDefault(x => x.Id == nodeId);
-        if (node is null) return Task.FromResult<IResult>(Results.NotFound(new { detail = "Node not found" }));
-        State.Nodes.Remove(node);
-        State.Nodes.Add(node with { Status = request.Status, GpuModel = request.GpuModel ?? node.GpuModel, VramGb = request.VramGb ?? node.VramGb, Region = request.Region ?? node.Region, LastHeartbeat = DateTimeOffset.UtcNow });
-        SaveAsync().GetAwaiter().GetResult();
-        return Task.FromResult<IResult>(Results.Json(new { node = State.Nodes.First(x => x.Id == nodeId).Public() }));
+        object? result = null;
+        await SaveAsync(() =>
+        {
+            var job = State.Jobs.FirstOrDefault(x => x.Id == jobId);
+            if (job is null)
+            {
+                return;
+            }
+
+            var ev = new JobEvent(State.NextEventId++, jobId, request.EventType, request.Payload, DateTimeOffset.UtcNow);
+            State.JobEvents.Add(ev);
+            if (!string.IsNullOrWhiteSpace(request.Status))
+            {
+                State.Jobs.Remove(job);
+                State.Jobs.Add(job with { Status = request.Status, Error = request.Error ?? job.Error, FinishedAt = request.Status is "succeeded" or "failed" or "cancelled" ? DateTimeOffset.UtcNow : null });
+            }
+
+            result = new { @event = ev, job = State.Jobs.First(x => x.Id == jobId) };
+        });
+        return result;
     }
 
-    public Task<IResult> NodeStatusAsync(string nodeId, string status, bool approve = false)
+    public async Task<IResult> HeartbeatNodeAsync(string nodeId, NodeHeartbeat request)
     {
-        var node = State.Nodes.FirstOrDefault(x => x.Id == nodeId);
-        if (node is null) return Task.FromResult<IResult>(Results.NotFound(new { detail = "Node not found" }));
-        State.Nodes.Remove(node);
-        State.Nodes.Add(node with { Status = status, ApprovedAt = approve ? DateTimeOffset.UtcNow : node.ApprovedAt, LastHeartbeat = DateTimeOffset.UtcNow });
-        SaveAsync().GetAwaiter().GetResult();
-        return Task.FromResult<IResult>(Results.Json(new { node = State.Nodes.First(x => x.Id == nodeId).Public() }));
+        IResult? result = null;
+        await SaveAsync(() =>
+        {
+            var node = State.Nodes.FirstOrDefault(x => x.Id == nodeId);
+            if (node is null)
+            {
+                result = Results.NotFound(new { detail = "Node not found" });
+                return;
+            }
+
+            State.Nodes.Remove(node);
+            State.Nodes.Add(node with { Status = request.Status, GpuModel = request.GpuModel ?? node.GpuModel, VramGb = request.VramGb ?? node.VramGb, Region = request.Region ?? node.Region, LastHeartbeat = DateTimeOffset.UtcNow });
+            result = Results.Json(new { node = State.Nodes.First(x => x.Id == nodeId).Public() });
+        });
+        return result!;
     }
 
-    public Task<IResult> PollJobAsync(string nodeId)
+    public async Task<IResult> NodeStatusAsync(string nodeId, string status, bool approve = false)
     {
-        var node = State.Nodes.FirstOrDefault(x => x.Id == nodeId);
-        if (node is null) return Task.FromResult<IResult>(Results.NotFound(new { detail = "Node not found" }));
-        var job = State.Jobs.Where(x => x.Status == "queued").OrderBy(x => x.CreatedAt).FirstOrDefault();
-        if (job is null) return Task.FromResult<IResult>(Results.Json(new { job = (object?)null }));
-        State.Jobs.Remove(job);
-        var running = job with { Status = "running", NodeId = nodeId, StartedAt = DateTimeOffset.UtcNow };
-        State.Jobs.Add(running);
-        SaveAsync().GetAwaiter().GetResult();
-        return Task.FromResult<IResult>(Results.Json(new { job = running }));
+        IResult? result = null;
+        await SaveAsync(() =>
+        {
+            var node = State.Nodes.FirstOrDefault(x => x.Id == nodeId);
+            if (node is null)
+            {
+                result = Results.NotFound(new { detail = "Node not found" });
+                return;
+            }
+
+            State.Nodes.Remove(node);
+            State.Nodes.Add(node with { Status = status, ApprovedAt = approve ? DateTimeOffset.UtcNow : node.ApprovedAt, LastHeartbeat = DateTimeOffset.UtcNow });
+            result = Results.Json(new { node = State.Nodes.First(x => x.Id == nodeId).Public() });
+        });
+        return result!;
+    }
+
+    public async Task<IResult> PollJobAsync(string nodeId)
+    {
+        IResult? result = null;
+        await SaveAsync(() =>
+        {
+            var node = State.Nodes.FirstOrDefault(x => x.Id == nodeId);
+            if (node is null)
+            {
+                result = Results.NotFound(new { detail = "Node not found" });
+                return;
+            }
+
+            var job = State.Jobs.Where(x => x.Status == "queued").OrderBy(x => x.CreatedAt).FirstOrDefault();
+            if (job is null)
+            {
+                result = Results.Json(new { job = (object?)null });
+                return;
+            }
+
+            State.Jobs.Remove(job);
+            var running = job with { Status = "running", NodeId = nodeId, StartedAt = DateTimeOffset.UtcNow };
+            State.Jobs.Add(running);
+            result = Results.Json(new { job = running });
+        });
+        return result!;
     }
 
     public async Task<TaskItem> CreateTaskAsync(int userId, string type, string? title, string? projectId, int? fileId, int imageCount)
     {
-        var task = CreateTaskCore(userId, type, title, projectId, fileId, imageCount);
-        await SaveAsync();
-        return task;
+        TaskItem? task = null;
+        await SaveAsync(() => task = CreateTaskCore(userId, type, title, projectId, fileId, imageCount));
+        return task!;
     }
 
     TaskItem CreateTaskCore(int userId, string type, string? title, string? projectId, int? fileId, int imageCount)
@@ -885,9 +1035,8 @@ public sealed class MaskFlowStore
 
     public async Task<TaskItem?> UpdateTaskAsync(int userId, string taskId, string status, double progress, string? error)
     {
-        var task = ApplyTaskUpdate(userId, taskId, status, progress, error);
-        if (task is null) return null;
-        await SaveAsync();
+        TaskItem? task = null;
+        await SaveAsync(() => task = ApplyTaskUpdate(userId, taskId, status, progress, error));
         return task;
     }
 

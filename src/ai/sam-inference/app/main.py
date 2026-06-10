@@ -43,13 +43,27 @@ ALLOW_CLIP_DOWNLOAD = os.getenv("SAM3_ALLOW_CLIP_DOWNLOAD", "false").lower() in 
 }
 CLIP_MODEL_SHA256 = "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af"
 INTERNAL_KEY = os.getenv("SAM3_INTERNAL_KEY", "")
+REQUIRE_INTERNAL_KEY = os.getenv("SAM3_REQUIRE_INTERNAL_KEY", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+if REQUIRE_INTERNAL_KEY and not INTERNAL_KEY:
+    raise RuntimeError("SAM3_INTERNAL_KEY is required when SAM3_REQUIRE_INTERNAL_KEY is enabled.")
 
 app = FastAPI(title="SAM 3 Backend")
 
 
 @app.middleware("http")
 async def verify_internal_key(request: Request, call_next):
-    if INTERNAL_KEY and request.url.path.startswith("/api/"):
+    if request.url.path.startswith("/api/"):
+        if not INTERNAL_KEY:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "SAM3_INTERNAL_KEY is not configured."},
+            )
         provided = request.headers.get("X-Internal-Key", "")
         if provided != INTERNAL_KEY:
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
@@ -569,6 +583,11 @@ def _build_response(
 @app.get("/")
 def index() -> dict[str, str]:
     return {"name": "SAM 3 Backend", "docs": "/docs"}
+
+
+@app.get("/health")
+def health() -> dict[str, bool]:
+    return {"ok": True}
 
 
 @app.get("/api/status")

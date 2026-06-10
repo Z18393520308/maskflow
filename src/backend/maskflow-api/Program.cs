@@ -81,6 +81,8 @@ builder.Services.AddSwaggerGen(options =>
 
 var app = builder.Build();
 
+ProductionSecretsValidator.EnsureConfigured(app.Environment);
+
 app.UseCors();
 if (app.Environment.IsDevelopment())
 {

@@ -8,7 +8,8 @@ services:
     expose:
       - "8001"
     environment:
-      SAM3_INTERNAL_KEY: ${SAM3_INTERNAL_KEY:-maskflow-sam-dev-key}
+      SAM3_INTERNAL_KEY: ${SAM3_INTERNAL_KEY:?Set SAM3_INTERNAL_KEY in .env}
+      SAM3_REQUIRE_INTERNAL_KEY: "true"
       SAM3_MODEL: /models/sam3.pt
       SAM3_MAX_INFERENCE_SIDE: "1024"
       SAM3_ENABLE_CLIP_CLASSIFICATION: "true"
@@ -31,7 +32,7 @@ services:
       - "9001:9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-admin123456}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
     volumes:
       - minio-data:/data
     restart: unless-stopped
@@ -42,14 +43,14 @@ services:
     ports:
       - "3306:3306"
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-maskflow_root}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
       MYSQL_DATABASE: maskflow
       MYSQL_USER: maskflow
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-maskflow}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-maskflow_root}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -66,15 +67,15 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:8080
-      SAM3_INTERNAL_KEY: ${SAM3_INTERNAL_KEY:-maskflow-sam-dev-key}
-      MASKFLOW_ADMIN_API_KEY: ${MASKFLOW_ADMIN_API_KEY:-maskflow-admin-dev-key}
+      SAM3_INTERNAL_KEY: ${SAM3_INTERNAL_KEY:?Set SAM3_INTERNAL_KEY in .env}
+      MASKFLOW_ADMIN_API_KEY: ${MASKFLOW_ADMIN_API_KEY:?Set MASKFLOW_ADMIN_API_KEY in .env}
       MASKFLOW_CORS_ORIGINS: ${MASKFLOW_CORS_ORIGINS:-http://localhost:3000}
       SAM_SERVICE_URL: http://sam-inference:8001
       MASKFLOW_STORAGE: /data/storage
-      MASKFLOW_MYSQL: Server=mysql;Port=3306;Database=maskflow;User ID=maskflow;Password=${MYSQL_PASSWORD:-maskflow};Allow User Variables=true;
+      MASKFLOW_MYSQL: Server=mysql;Port=3306;Database=maskflow;User ID=maskflow;Password=${MYSQL_PASSWORD};Allow User Variables=true;
       MASKFLOW_MINIO_ENDPOINT: http://minio:9000
       MASKFLOW_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-admin}
-      MASKFLOW_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-admin123456}
+      MASKFLOW_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       MASKFLOW_MINIO_BUCKET: maskflow
     volumes:
       - maskflow-api-data:/data
