@@ -28,8 +28,12 @@
         </div>
       </div>
     </section>
-    <section id="features" class="home-feature-grid">
-      <article v-for="feature in homeFeatures" :key="feature[1]"><span>{{ feature[0] }}</span><h2>{{ feature[1] }}</h2><p>{{ feature[2] }}</p></article>
+    <section id="features" class="home-features">
+      <article v-for="feature in homeFeatures" :key="feature[1]" class="home-feature-card">
+        <span>{{ feature[0] }}</span>
+        <h3>{{ feature[1] }}</h3>
+        <p>{{ feature[2] }}</p>
+      </article>
     </section>
   </main>
 </template>
