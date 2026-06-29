@@ -80,13 +80,26 @@
 
         <section class="work-stage yolo-stage annotate-canvas-panel">
           <div class="canvas-topbar">
+            <button :class="['btn compact-btn', annotate.drawMode ? 'active-tool' : 'secondary']" type="button" :disabled="!annotate.current" @click="toggleManualDrawMode">
+              {{ annotate.drawMode ? '退出画框' : '手动画框' }}
+            </button>
             <button class="btn secondary compact-btn" type="button" :disabled="currentFileIndex <= 0" @click="selectAdjacentFile(-1)">上一张</button>
             <span>{{ currentFileIndex >= 0 ? currentFileIndex + 1 : 0 }} / {{ files.rows.length }} · {{ annotate.current?.name || '未选择图片' }}</span>
             <button class="btn secondary compact-btn" type="button" :disabled="currentFileIndex < 0 || currentFileIndex >= files.rows.length - 1" @click="selectAdjacentFile(1)">下一张</button>
           </div>
           <div v-if="annotate.current" class="yolo-canvas">
-            <div v-if="previewUrl(annotate.current)" class="yolo-image-frame" :style="yoloFrameStyle">
+            <div
+              v-if="previewUrl(annotate.current)"
+              :class="['yolo-image-frame', { drawing: annotate.drawMode }]"
+              :style="yoloFrameStyle"
+              @pointerdown="beginManualBox"
+              @pointermove="updateManualBox"
+              @pointerup="finishManualBox"
+              @pointercancel="cancelManualBox"
+              @pointerleave="updateManualBox"
+            >
               <img :src="previewUrl(annotate.current)" alt="标注图片" @load="updateYoloFrame" />
+              <div v-if="annotate.drawingBox" class="manual-draw-box" :style="drawingBoxStyle()"></div>
               <svg class="yolo-mask-layer" viewBox="0 0 100 100" preserveAspectRatio="none">
                 <polygon
                   v-for="item in annotate.annotations"
@@ -99,7 +112,7 @@
               <button
                 v-for="item in annotate.annotations"
                 :key="item.id"
-                :class="['yolo-box', { active: annotate.activeId === item.id, unassigned: !item.label }]"
+                :class="['yolo-box', { active: annotate.activeId === item.id, unassigned: !item.label, matched: reviewFilterActive && reviewFilterMatchedAnnotations.some((match) => match.id === item.id) }]"
                 :style="annotationBoxStyle(item)"
                 type="button"
                 @click="annotate.activeId = item.id"
@@ -128,8 +141,52 @@
               <h2>标注结果</h2>
               <p>{{ annotationStats.confirmed }} 人工已确认 · {{ annotationStats.pending }} 待人确认 · {{ annotationStats.unassigned }} 未分配</p>
             </div>
-            <button class="btn compact-btn" type="button" :disabled="!annotate.annotations.length" @click="saveAnnotation">保存</button>
+            <div class="annotation-actions">
+              <button :class="['btn compact-btn', annotate.reviewFilterOpen ? 'active-tool' : 'secondary']" type="button" :disabled="!annotate.annotations.length" @click="toggleReviewFilterPanel">
+                {{ annotate.reviewFilterOpen ? '收起筛选' : '筛选' }}
+              </button>
+              <button class="btn compact-btn" type="button" :disabled="!annotate.annotations.length" @click="saveAnnotation">保存</button>
+            </div>
           </div>
+          <section v-if="annotate.reviewFilterOpen" class="review-filter-panel">
+            <div class="review-filter-head">
+              <div>
+                <h3>标注筛选</h3>
+                <p>
+                  {{ reviewFilterActive ? `当前图命中 ${reviewFilterMatchedAnnotations.length} 个框` : '按面积、长宽、位置筛选全项目' }}
+                  <span v-if="annotate.reviewFilterGlobalMatches">
+                    · 全项目 {{ annotate.reviewFilterGlobalMatches.annotations }} 个 / {{ annotate.reviewFilterGlobalMatches.files }} 张图
+                  </span>
+                </p>
+              </div>
+              <button class="btn ghost compact-btn" type="button" @click="resetReviewFilters">清空</button>
+            </div>
+            <div class="review-filter-grid" @input="annotate.reviewFilterGlobalMatches = null" @change="annotate.reviewFilterGlobalMatches = null">
+              <label>标签<select v-model="annotate.reviewFilters.label"><option value="">全部</option><option v-for="label in annotate.labels" :key="label" :value="label">{{ label }}</option></select></label>
+              <label>最小面积%<input v-model="annotate.reviewFilters.minArea" type="number" min="0" max="100" step="0.1" /></label>
+              <label>最大面积%<input v-model="annotate.reviewFilters.maxArea" type="number" min="0" max="100" step="0.1" /></label>
+              <label>最小宽%<input v-model="annotate.reviewFilters.minWidth" type="number" min="0" max="100" step="0.1" /></label>
+              <label>最大宽%<input v-model="annotate.reviewFilters.maxWidth" type="number" min="0" max="100" step="0.1" /></label>
+              <label>最小高%<input v-model="annotate.reviewFilters.minHeight" type="number" min="0" max="100" step="0.1" /></label>
+              <label>最大高%<input v-model="annotate.reviewFilters.maxHeight" type="number" min="0" max="100" step="0.1" /></label>
+              <label>最小宽高比<input v-model="annotate.reviewFilters.minAspect" type="number" min="0" step="0.1" /></label>
+              <label>最大宽高比<input v-model="annotate.reviewFilters.maxAspect" type="number" min="0" step="0.1" /></label>
+              <label>中心X最小%<input v-model="annotate.reviewFilters.minCenterX" type="number" min="0" max="100" step="1" /></label>
+              <label>中心X最大%<input v-model="annotate.reviewFilters.maxCenterX" type="number" min="0" max="100" step="1" /></label>
+              <label>中心Y最小%<input v-model="annotate.reviewFilters.minCenterY" type="number" min="0" max="100" step="1" /></label>
+              <label>中心Y最大%<input v-model="annotate.reviewFilters.maxCenterY" type="number" min="0" max="100" step="1" /></label>
+              <label>最小置信度<input v-model="annotate.reviewFilters.minConfidence" type="number" min="0" max="1" step="0.01" /></label>
+            </div>
+            <div class="review-filter-actions">
+              <button class="btn ghost compact-btn" type="button" :disabled="!reviewFilterActive || loading" @click="collectReviewFilterMatches">
+                统计全项目命中
+              </button>
+              <button class="btn secondary compact-btn review-delete-btn" type="button" :disabled="!reviewFilterActive || loading" @click="deleteReviewFilterMatches">
+                删除全项目命中项
+              </button>
+            </div>
+          </section>
+
           <div class="annotation-list">
             <section
               v-for="item in annotate.annotations"
@@ -227,6 +284,18 @@ const annotationBoxStyle = inject("annotationBoxStyle");
 const segmentPoints = inject("segmentPoints");
 const yoloFrameStyle = inject("yoloFrameStyle");
 const updateYoloFrame = inject("updateYoloFrame");
+const drawingBoxStyle = inject("drawingBoxStyle");
+const beginManualBox = inject("beginManualBox");
+const updateManualBox = inject("updateManualBox");
+const finishManualBox = inject("finishManualBox");
+const cancelManualBox = inject("cancelManualBox");
+const toggleManualDrawMode = inject("toggleManualDrawMode");
+const reviewFilterActive = inject("reviewFilterActive");
+const reviewFilterMatchedAnnotations = inject("reviewFilterMatchedAnnotations");
+const collectReviewFilterMatches = inject("collectReviewFilterMatches");
+const resetReviewFilters = inject("resetReviewFilters");
+const toggleReviewFilterPanel = inject("toggleReviewFilterPanel");
+const deleteReviewFilterMatches = inject("deleteReviewFilterMatches");
 const addAnnotateLabel = inject("addAnnotateLabel");
 const beginDeleteAnnotateLabel = inject("beginDeleteAnnotateLabel");
 const confirmDeleteAnnotateLabel = inject("confirmDeleteAnnotateLabel");

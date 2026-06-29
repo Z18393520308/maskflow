@@ -73,7 +73,27 @@ export function useMaskFlowApp() {
     dirty: false,
     savedAt: null,
     zoom: 1,
-    filter: "all"
+    filter: "all",
+    drawMode: false,
+    drawingBox: null,
+    reviewFilterOpen: false,
+    reviewFilterGlobalMatches: null,
+    reviewFilters: {
+      label: "",
+      minArea: "",
+      maxArea: "",
+      minWidth: "",
+      maxWidth: "",
+      minHeight: "",
+      maxHeight: "",
+      minAspect: "",
+      maxAspect: "",
+      minCenterX: "",
+      maxCenterX: "",
+      minCenterY: "",
+      maxCenterY: "",
+      minConfidence: ""
+    }
   });
   const settings = reactive({
     active: "profile",
@@ -838,11 +858,145 @@ export function useMaskFlowApp() {
       unassigned
     };
   });
+  const reviewFilterActive = computed(() => Object.values(annotate.reviewFilters).some((value) => String(value ?? "").trim() !== ""));
+  const reviewFilterMatchedAnnotations = computed(() => {
+    if (!reviewFilterActive.value) return [];
+    return annotate.annotations.filter(matchesReviewFilters);
+  });
+  const reviewFilterMatchedIds = computed(() => new Set(reviewFilterMatchedAnnotations.value.map((item) => item.id)));
   const saveStateText = computed(() => {
     if (annotate.dirty) return "有未保存修改";
     if (annotate.savedAt) return `已保存 ${new Date(annotate.savedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
     return "等待标注";
   });
+
+  function numberFilterValue(key) {
+    if (String(annotate.reviewFilters[key] ?? "").trim() === "") return null;
+    const value = Number(annotate.reviewFilters[key]);
+    return Number.isFinite(value) ? value / 100 : null;
+  }
+
+  function ratioFilterValue(key) {
+    if (String(annotate.reviewFilters[key] ?? "").trim() === "") return null;
+    const value = Number(annotate.reviewFilters[key]);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function rangePass(value, min, max) {
+    if (min !== null && value < min) return false;
+    if (max !== null && value > max) return false;
+    return true;
+  }
+
+  function matchesReviewFilters(item) {
+    const box = item.bbox;
+    if (!box) return false;
+    const filters = annotate.reviewFilters;
+    if (filters.label && !labelsEqual(item.label, filters.label)) return false;
+    const area = Number(box.width || 0) * Number(box.height || 0);
+    const aspect = Number(box.height || 0) > 0 ? Number(box.width || 0) / Number(box.height || 0) : 0;
+    const confidence = Number(item.confidence ?? item.Confidence ?? 1);
+    return rangePass(area, numberFilterValue("minArea"), numberFilterValue("maxArea"))
+      && rangePass(Number(box.width || 0), numberFilterValue("minWidth"), numberFilterValue("maxWidth"))
+      && rangePass(Number(box.height || 0), numberFilterValue("minHeight"), numberFilterValue("maxHeight"))
+      && rangePass(Number(box.cx || 0), numberFilterValue("minCenterX"), numberFilterValue("maxCenterX"))
+      && rangePass(Number(box.cy || 0), numberFilterValue("minCenterY"), numberFilterValue("maxCenterY"))
+      && rangePass(aspect, ratioFilterValue("minAspect"), ratioFilterValue("maxAspect"))
+      && rangePass(confidence, ratioFilterValue("minConfidence"), null);
+  }
+
+  function resetReviewFilters() {
+    for (const key of Object.keys(annotate.reviewFilters)) annotate.reviewFilters[key] = "";
+    annotate.reviewFilterGlobalMatches = null;
+    annotate.status = "筛选条件已清空";
+  }
+
+  function toggleReviewFilterPanel() {
+    annotate.reviewFilterOpen = !annotate.reviewFilterOpen;
+  }
+
+  async function collectReviewFilterMatches() {
+    if (!reviewFilterActive.value) {
+      annotate.reviewFilterGlobalMatches = null;
+      return { files: 0, annotations: 0 };
+    }
+    let matchedFiles = 0;
+    let matchedAnnotations = 0;
+    const candidates = files.rows.filter((item) => item.annotated || item.id === annotate.current?.id);
+    for (const file of candidates) {
+      let annotation;
+      if (file.id === annotate.current?.id) {
+        annotation = { annotations: annotate.annotations };
+      } else {
+        try {
+          const data = await apiFetch(`/api/annotations/file/${file.id}`);
+          annotation = data.annotation;
+        } catch {
+          continue;
+        }
+      }
+      const count = (annotation.annotations || []).map(normalizeAnnotationItem).filter(matchesReviewFilters).length;
+      if (count) {
+        matchedFiles += 1;
+        matchedAnnotations += count;
+      }
+    }
+    annotate.reviewFilterGlobalMatches = { files: matchedFiles, annotations: matchedAnnotations };
+    annotate.status = `全项目筛选命中 ${matchedAnnotations} 个标注，分布在 ${matchedFiles} 张图片`;
+    return annotate.reviewFilterGlobalMatches;
+  }
+
+  async function deleteReviewFilterMatches() {
+    if (!reviewFilterActive.value) return;
+    loading.value = true;
+    let changedFiles = 0;
+    let removed = 0;
+    const candidates = files.rows.filter((item) => item.annotated || item.id === annotate.current?.id);
+    try {
+      for (const [index, file] of candidates.entries()) {
+        annotate.status = `正在清理全项目命中项：${index + 1} / ${candidates.length} · ${file.name}`;
+        let annotation;
+        if (file.id === annotate.current?.id) {
+          annotation = {
+            fileId: file.id,
+            width: annotate.width,
+            height: annotate.height,
+            annotations: annotate.annotations.map((item) => ({ ...item }))
+          };
+        } else {
+          try {
+            const data = await apiFetch(`/api/annotations/file/${file.id}`);
+            annotation = data.annotation;
+          } catch {
+            continue;
+          }
+        }
+        const items = (annotation.annotations || []).map(normalizeAnnotationItem);
+        const nextItems = items.filter((item) => !matchesReviewFilters(item));
+        const delta = items.length - nextItems.length;
+        if (!delta) continue;
+        removed += delta;
+        changedFiles += 1;
+        const saved = await apiFetch(`/api/annotations/file/${file.id}`, {
+          method: "PUT",
+          body: {
+            fileId: file.id,
+            width: annotation.width,
+            height: annotation.height,
+            annotations: nextItems
+          }
+        });
+        if (file.id === annotate.current?.id) applyAnnotation(saved.annotation, { status: "当前图片命中项已删除" });
+      }
+      await refreshFiles();
+      annotate.reviewFilterGlobalMatches = { files: changedFiles, annotations: removed };
+      annotate.status = removed ? `已从全项目 ${changedFiles} 张图片删除 ${removed} 个命中标注` : "全项目没有命中的标注";
+    } catch (error) {
+      annotate.status = error.message;
+    } finally {
+      loading.value = false;
+    }
+  }
 
   function markAnnotationDirty(status = "有未保存修改") {
     annotate.dirty = true;
@@ -1035,7 +1189,12 @@ export function useMaskFlowApp() {
   }
 
   function annotationBoxStyle(item) {
-    return buildAnnotationBoxStyle(item, annotate.labels, annotate.activeId === item.id);
+    const highlighted = reviewFilterActive.value && reviewFilterMatchedIds.value.has(item.id);
+    return {
+      ...buildAnnotationBoxStyle(item, annotate.labels, annotate.activeId === item.id),
+      outline: highlighted ? "3px solid rgba(250, 204, 21, 0.95)" : undefined,
+      outlineOffset: highlighted ? "3px" : undefined
+    };
   }
 
   function annotationPolygonStyle(item) {
@@ -1084,6 +1243,102 @@ export function useMaskFlowApp() {
       height = width / imageRatio;
     }
     annotate.frame = { width: Math.max(1, width), height: Math.max(1, height) };
+  }
+
+  function clamp01(value) {
+    return Math.max(0, Math.min(1, Number(value) || 0));
+  }
+
+  function pointerToYoloPoint(event) {
+    const frame = event.currentTarget?.closest?.(".yolo-image-frame") || event.currentTarget;
+    const rect = frame?.getBoundingClientRect?.();
+    if (!rect?.width || !rect?.height) return null;
+    return {
+      x: clamp01((event.clientX - rect.left) / rect.width),
+      y: clamp01((event.clientY - rect.top) / rect.height)
+    };
+  }
+
+  function boxFromPoints(start, end) {
+    const left = Math.min(start.x, end.x);
+    const right = Math.max(start.x, end.x);
+    const top = Math.min(start.y, end.y);
+    const bottom = Math.max(start.y, end.y);
+    return {
+      cx: clamp01((left + right) / 2),
+      cy: clamp01((top + bottom) / 2),
+      width: clamp01(right - left),
+      height: clamp01(bottom - top)
+    };
+  }
+
+  function drawingBoxStyle() {
+    const box = annotate.drawingBox?.bbox;
+    if (!box) return {};
+    return {
+      left: `${(box.cx - box.width / 2) * 100}%`,
+      top: `${(box.cy - box.height / 2) * 100}%`,
+      width: `${box.width * 100}%`,
+      height: `${box.height * 100}%`
+    };
+  }
+
+  function manualAnnotationLabel() {
+    if (!isUnassignedLabel(annotate.defaultRunLabel)) return annotate.defaultRunLabel;
+    return activeAnnotation.value?.label || annotate.labels[0] || null;
+  }
+
+  function beginManualBox(event) {
+    if (!annotate.drawMode || !annotate.current) return;
+    if (event.button !== undefined && event.button !== 0) return;
+    const point = pointerToYoloPoint(event);
+    if (!point) return;
+    event.preventDefault();
+    event.currentTarget?.setPointerCapture?.(event.pointerId);
+    annotate.drawingBox = { start: point, current: point, bbox: boxFromPoints(point, point) };
+  }
+
+  function updateManualBox(event) {
+    if (!annotate.drawMode || !annotate.drawingBox) return;
+    const point = pointerToYoloPoint(event);
+    if (!point) return;
+    annotate.drawingBox.current = point;
+    annotate.drawingBox.bbox = boxFromPoints(annotate.drawingBox.start, point);
+  }
+
+  function finishManualBox(event) {
+    if (!annotate.drawMode || !annotate.drawingBox) return;
+    updateManualBox(event);
+    const bbox = annotate.drawingBox.bbox;
+    annotate.drawingBox = null;
+    event.currentTarget?.releasePointerCapture?.(event.pointerId);
+    if (!bbox || bbox.width < 0.003 || bbox.height < 0.003) {
+      annotate.status = "框太小，已忽略";
+      return;
+    }
+    const label = manualAnnotationLabel();
+    const item = normalizeAnnotationItem({
+      id: `manual_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+      classId: findLabelIndex(label),
+      label,
+      bbox,
+      segment: null,
+      confidence: 1,
+      confirmed: false
+    });
+    annotate.annotations.push(item);
+    annotate.activeId = item.id;
+    markAnnotationDirty(label ? `已新增 ${label} 手动画框，记得保存` : "已新增未分配手动画框，记得选择标签并保存");
+  }
+
+  function cancelManualBox() {
+    annotate.drawingBox = null;
+  }
+
+  function toggleManualDrawMode() {
+    annotate.drawMode = !annotate.drawMode;
+    annotate.drawingBox = null;
+    annotate.status = annotate.drawMode ? "画框模式已开启：在图片上拖拽补一个目标框" : "画框模式已关闭";
   }
 
   function setYoloZoom(value) {
@@ -1326,6 +1581,9 @@ export function useMaskFlowApp() {
     removeAnnotation, toggleAnnotationConfirmed, activeAnnotation, annotationStats, currentFileIndex,
     saveStateText, yoloTxt, annotationBoxStyle, annotationPolygonStyle, labelChipStyle, labelSwatchStyle,
     annotationRowAccentStyle, labelColor, segmentPoints, yoloFrameStyle, updateYoloFrame,
+    drawingBoxStyle, beginManualBox, updateManualBox, finishManualBox, cancelManualBox, toggleManualDrawMode,
+    reviewFilterActive, reviewFilterMatchedAnnotations, collectReviewFilterMatches,
+    resetReviewFilters, toggleReviewFilterPanel, deleteReviewFilterMatches,
     setYoloZoom, resetYoloZoom, selectAdjacentFile, addAnnotateLabel, beginDeleteAnnotateLabel,
     confirmDeleteAnnotateLabel, cancelDeleteAnnotateLabel, canRunAnnotateAi, formatAnnotationLabel,
     applyLabelToActive, applyAnnotationLabel, syncBatchLabelsFromAnnotations, syncAnnotationLabels, changeAnnotateFiles,

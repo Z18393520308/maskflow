@@ -4350,6 +4350,25 @@ body:has(.app-sidebar) {
   width: 100%;
   height: 100%;
   object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.yolo-image-frame.drawing {
+  cursor: crosshair;
+}
+
+.yolo-image-frame.drawing .yolo-box {
+  pointer-events: none;
+}
+
+.manual-draw-box {
+  position: absolute;
+  z-index: 5;
+  border: 2px dashed #facc15;
+  background: rgba(250, 204, 21, 0.16);
+  box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.42);
+  pointer-events: none;
 }
 
 .yolo-mask-layer {
@@ -4379,6 +4398,16 @@ body:has(.app-sidebar) {
   transition: box-shadow 0.15s ease, border-width 0.15s ease;
 }
 
+.yolo-box.matched {
+  box-shadow: 0 0 0 3px rgba(250, 204, 21, 0.92), 0 8px 20px rgba(15, 23, 42, 0.22);
+}
+
+.active-tool {
+  background: #0f172a;
+  color: #fff;
+  border-color: #0f172a;
+}
+
 .annotation-row.unassigned {
   opacity: 0.92;
 }
@@ -4400,6 +4429,86 @@ body:has(.app-sidebar) {
 .annotation-list {
   display: grid;
   gap: 10px;
+}
+
+.annotation-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.review-filter-panel {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid #dbe5f5;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.review-filter-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.review-filter-head h3,
+.review-filter-head p {
+  margin: 0;
+}
+
+.review-filter-head h3 {
+  color: #0f172a;
+  font-size: 14px;
+}
+
+.review-filter-head p {
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.review-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.review-filter-grid label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.review-filter-grid input,
+.review-filter-grid select {
+  width: 100%;
+  height: 30px;
+  border: 1px solid #dbe5f5;
+  border-radius: 6px;
+  padding: 0 8px;
+  background: #fff;
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.review-delete-btn {
+  justify-self: start;
+}
+
+.review-filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .result-panel-head {
