@@ -49,11 +49,12 @@ public sealed class AdminApiKeyFilter : IAsyncAuthorizationFilter
             return Task.CompletedTask;
         }
 
-        if (TryGetNodeId(path, out var nodeId))
+        if (TryGetNodeId(context.HttpContext, out var nodeId))
         {
             var nodeKey = context.HttpContext.Request.Headers["X-Node-Key"].ToString();
             if (store.ValidateNodeKey(nodeId, nodeKey))
             {
+                context.HttpContext.Items[MaskFlowHttpItems.NodeId] = nodeId;
                 return Task.CompletedTask;
             }
         }
@@ -71,24 +72,50 @@ public sealed class AdminApiKeyFilter : IAsyncAuthorizationFilter
         return Task.CompletedTask;
     }
 
-    static bool TryGetNodeId(PathString path, out string nodeId)
+    static bool TryGetNodeId(HttpContext context, out string nodeId)
     {
         nodeId = "";
+        var path = context.Request.Path;
         var segments = path.Value?.Split('/', StringSplitOptions.RemoveEmptyEntries) ?? [];
-        if (segments.Length < 3 || !segments[0].Equals("v1", StringComparison.OrdinalIgnoreCase)
-            || !segments[1].Equals("nodes", StringComparison.OrdinalIgnoreCase))
+        if (segments.Length < 2 || !segments[0].Equals("v1", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
 
-        var action = segments.Length > 3 ? segments[3] : "";
-        if (!action.Equals("heartbeat", StringComparison.OrdinalIgnoreCase))
+        if (segments.Length >= 4
+            && segments[1].Equals("nodes", StringComparison.OrdinalIgnoreCase)
+            && segments[3].Equals("heartbeat", StringComparison.OrdinalIgnoreCase))
         {
-            return false;
+            nodeId = segments[2];
+            return !string.IsNullOrWhiteSpace(nodeId);
         }
 
-        nodeId = segments[2];
-        return !string.IsNullOrWhiteSpace(nodeId);
+        if (segments.Length >= 5
+            && segments[1].Equals("nodes", StringComparison.OrdinalIgnoreCase)
+            && segments[3].Equals("jobs", StringComparison.OrdinalIgnoreCase)
+            && segments[4].Equals("poll", StringComparison.OrdinalIgnoreCase))
+        {
+            nodeId = segments[2];
+            return !string.IsNullOrWhiteSpace(nodeId);
+        }
+
+        if (segments.Length >= 4
+            && segments[1].Equals("jobs", StringComparison.OrdinalIgnoreCase)
+            && segments[3].Equals("events", StringComparison.OrdinalIgnoreCase))
+        {
+            nodeId = context.Request.Headers["X-Node-Id"].ToString();
+            return !string.IsNullOrWhiteSpace(nodeId);
+        }
+
+        if (segments.Length >= 4
+            && segments[1].Equals("jobs", StringComparison.OrdinalIgnoreCase)
+            && segments[3].Equals("status", StringComparison.OrdinalIgnoreCase))
+        {
+            nodeId = context.Request.Headers["X-Node-Id"].ToString();
+            return !string.IsNullOrWhiteSpace(nodeId);
+        }
+
+        return false;
     }
 
     static bool IsUserScopedJobEndpoint(PathString path, string method)

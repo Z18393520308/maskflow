@@ -41,6 +41,23 @@ const refreshExports = inject("refreshExports");
           <p>项目：{{ selectedProject?.name || '-' }}</p>
           <p>任务类型：{{ selectedProject ? selectedProjectDataTypeLabel : '-' }}</p>
           <p>导出格式：{{ selectedProject ? selectedProjectExportHint : 'YOLO txt' }}（仅包含已标注图片）</p>
+          <div class="export-format-picker">
+            <label :class="{ active: exportPage.format === 'yolo-detect' }">
+              <input v-model="exportPage.format" type="radio" value="yolo-detect" />
+              <span>YOLO 检测</span>
+              <small>使用矩形框，导出 detect 数据集</small>
+            </label>
+            <label :class="{ active: exportPage.format === 'yolo-segment' }">
+              <input v-model="exportPage.format" type="radio" value="yolo-segment" />
+              <span>YOLO 分割</span>
+              <small>优先使用掩码多边形，导出 segment 数据集</small>
+            </label>
+            <label :class="{ active: exportPage.format === 'classification-crops' }">
+              <input v-model="exportPage.format" type="radio" value="classification-crops" />
+              <span>分类裁剪</span>
+              <small>按标注框裁出目标图，按标签目录归类</small>
+            </label>
+          </div>
           <div class="export-split-form">
             <label>训练集 train %<input v-model.number="exportPage.split.train" type="number" min="0" max="100" /></label>
             <label>验证集 val %<input v-model.number="exportPage.split.val" type="number" min="0" max="100" /></label>
@@ -54,7 +71,7 @@ const refreshExports = inject("refreshExports");
         </article>
         <article class="work-card wide">
           <h2>目录预览</h2>
-          <pre>{{ selectedProject?.name || 'project' }}/
+          <pre v-if="exportPage.format !== 'classification-crops'">{{ selectedProject?.name || 'project' }}/
   images/train
   images/val
   images/test
@@ -62,6 +79,11 @@ const refreshExports = inject("refreshExports");
   labels/val
   labels/test
   data.yaml</pre>
+          <pre v-else>{{ selectedProject?.name || 'project' }}/
+  classification/train/{label}/crop.jpg
+  classification/val/{label}/crop.jpg
+  classification/test/{label}/crop.jpg
+  classes.txt</pre>
         </article>
       </section>
 
@@ -76,6 +98,7 @@ const refreshExports = inject("refreshExports");
             <tr>
               <th>导出 ID</th>
               <th>项目</th>
+              <th>格式</th>
               <th>划分</th>
               <th>大小</th>
               <th>时间</th>
@@ -86,12 +109,13 @@ const refreshExports = inject("refreshExports");
             <tr v-for="item in exportPage.rows" :key="item.id">
               <td>{{ item.id }}</td>
               <td>{{ item.projectName || item.projectId || '-' }}</td>
+              <td>{{ item.format || '-' }}</td>
               <td>{{ item.split ? `train ${item.split.train}% / val ${item.split.val}% / test ${item.split.test}%` : '-' }}</td>
               <td>{{ formatBytes(item.size) }}</td>
               <td>{{ formatDateTime(item.finishedAt || item.createdAt) }}</td>
               <td><button class="btn secondary compact-btn" type="button" :disabled="loading || item.status !== 'completed'" @click="downloadExportItem(item)">下载</button></td>
             </tr>
-            <tr v-if="!exportPage.rows.length"><td colspan="6">当前项目还没有导出记录。</td></tr>
+            <tr v-if="!exportPage.rows.length"><td colspan="7">当前项目还没有导出记录。</td></tr>
           </tbody>
         </table>
       </section>

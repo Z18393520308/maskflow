@@ -32,6 +32,12 @@ public sealed class ProjectService
         return updated is null ? null : ToDto(userId, updated);
     }
 
+    public async Task<ProjectSummaryDto?> CopyAsync(int userId, string projectId, ProjectCopyRequest request)
+    {
+        var copied = await store.CopyProjectAsync(userId, projectId, request);
+        return copied is null ? null : ToDto(userId, copied);
+    }
+
     public Task<bool> DeleteAsync(int userId, string projectId) => store.DeleteProjectAsync(userId, projectId);
 
     public List<string> GetLabels(int userId, string projectId) => store.GetProjectLabels(userId, projectId);

@@ -34,8 +34,8 @@ public sealed class NodesController : ControllerBase
     [HttpPost("{nodeId}/heartbeat")]
     public async Task<IActionResult> Heartbeat(string nodeId, [FromBody] NodeHeartbeat request)
     {
-        var result = await store.HeartbeatNodeAsync(nodeId, request);
-        return new JsonResult(((Microsoft.AspNetCore.Http.HttpResults.JsonHttpResult<object>)result).Value) { StatusCode = 200 };
+        var node = await store.HeartbeatNodeAsync(nodeId, request);
+        return node is null ? NotFound(new { detail = "Node not found" }) : Ok(new { node = node.Public() });
     }
 
     [HttpPost("{nodeId}/status")]
@@ -43,7 +43,19 @@ public sealed class NodesController : ControllerBase
     {
         var status = body.TryGetProperty("status", out var s) ? s.GetString() ?? "offline" : "offline";
         var approve = body.TryGetProperty("approve", out var a) && a.GetBoolean();
-        var result = await store.NodeStatusAsync(nodeId, status, approve);
-        return new JsonResult(((Microsoft.AspNetCore.Http.HttpResults.JsonHttpResult<object>)result).Value) { StatusCode = 200 };
+        var node = await store.NodeStatusAsync(nodeId, status, approve);
+        return node is null ? NotFound(new { detail = "Node not found" }) : Ok(new { node = node.Public() });
+    }
+
+    [HttpPost("{nodeId}/jobs/poll")]
+    public async Task<IActionResult> PollJob(string nodeId)
+    {
+        var (nodeFound, job) = await store.PollJobAsync(nodeId);
+        if (!nodeFound)
+        {
+            return NotFound(new { detail = "Node not found" });
+        }
+
+        return Ok(new { job });
     }
 }

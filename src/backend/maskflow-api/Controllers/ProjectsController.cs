@@ -42,6 +42,14 @@ public sealed class ProjectsController : MaskFlowControllerBase
         return project is null ? NotFound(new { detail = "Project not found." }) : Ok(new { project });
     }
 
+    [HttpPost("{projectId}/copy")]
+    public async Task<IActionResult> Copy(string projectId, [FromBody] ProjectCopyRequest request)
+    {
+        var user = CurrentUser();
+        var project = await projectService.CopyAsync(user.Id, projectId, request);
+        return project is null ? NotFound(new { detail = "Project not found." }) : Ok(new { project, user = Store.PublicUser(Store.GetUser(user.Id)!) });
+    }
+
     [HttpDelete("{projectId}")]
     public async Task<IActionResult> Delete(string projectId)
     {

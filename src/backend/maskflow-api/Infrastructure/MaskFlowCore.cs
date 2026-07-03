@@ -1,9 +1,13 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.IO.Compression;
 using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.Processing;
 
 public static class Util
 {
@@ -15,6 +19,7 @@ public sealed class MaskFlowStore
 {
     readonly SemaphoreSlim gate = new(1, 1);
     readonly IMaskFlowRepository repository;
+    static readonly JsonSerializerOptions StateJsonOptions = new(JsonSerializerDefaults.Web);
     public string StorageRoot { get; } = Environment.GetEnvironmentVariable("MASKFLOW_STORAGE") ?? Path.Combine(AppContext.BaseDirectory, "data", "storage");
     string MinioEndpoint => Environment.GetEnvironmentVariable("MASKFLOW_MINIO_ENDPOINT") ?? "";
     string MinioAccessKey => Environment.GetEnvironmentVariable("MASKFLOW_MINIO_ACCESS_KEY") ?? "";
@@ -44,10 +49,24 @@ public sealed class MaskFlowStore
     public async Task SaveAsync(Action? mutate)
     {
         await gate.WaitAsync();
+        var original = State;
+        var working = CloneState(original);
+        var originalPendingLabels = pendingProjectLabelSync.ToHashSet(StringComparer.Ordinal);
         try
         {
+            State = working;
             mutate?.Invoke();
             await repository.SaveAsync(State, TakePendingProjectLabelSync());
+        }
+        catch
+        {
+            State = original;
+            pendingProjectLabelSync.Clear();
+            foreach (var projectId in originalPendingLabels)
+            {
+                pendingProjectLabelSync.Add(projectId);
+            }
+            throw;
         }
         finally
         {
@@ -58,8 +77,12 @@ public sealed class MaskFlowStore
     public async Task SaveAsync(Func<Task>? mutateAsync)
     {
         await gate.WaitAsync();
+        var original = State;
+        var working = CloneState(original);
+        var originalPendingLabels = pendingProjectLabelSync.ToHashSet(StringComparer.Ordinal);
         try
         {
+            State = working;
             if (mutateAsync is not null)
             {
                 await mutateAsync();
@@ -67,11 +90,25 @@ public sealed class MaskFlowStore
 
             await repository.SaveAsync(State, TakePendingProjectLabelSync());
         }
+        catch
+        {
+            State = original;
+            pendingProjectLabelSync.Clear();
+            foreach (var projectId in originalPendingLabels)
+            {
+                pendingProjectLabelSync.Add(projectId);
+            }
+            throw;
+        }
         finally
         {
             gate.Release();
         }
     }
+
+    static MaskFlowState CloneState(MaskFlowState state) =>
+        JsonSerializer.Deserialize<MaskFlowState>(JsonSerializer.Serialize(state, StateJsonOptions), StateJsonOptions)
+        ?? new MaskFlowState();
 
     IReadOnlyCollection<string>? TakePendingProjectLabelSync()
     {
@@ -385,6 +422,34 @@ public sealed class MaskFlowStore
         return path;
     }
 
+    async Task<string> CopyStoredObjectAsync(string sourcePath, int userId, string projectId, string fileName, string? contentType)
+    {
+        var safeName = Path.GetFileName(fileName);
+        var prefix = $"users/{userId}/projects/{projectId}/uploads";
+        var objectKey = $"{prefix}/{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}_{Util.Id()}_{safeName}";
+        if (UseMinio)
+        {
+            using var client = CreateS3Client();
+            await using var sourceStream = await OpenStoredObjectAsync(sourcePath);
+            await client.PutObjectAsync(new PutObjectRequest
+            {
+                BucketName = MinioBucket,
+                Key = objectKey,
+                InputStream = sourceStream,
+                ContentType = contentType ?? "application/octet-stream"
+            });
+            return $"minio://{MinioBucket}/{objectKey}";
+        }
+
+        var userDir = Path.Combine(StorageRoot, userId.ToString(), "projects", projectId);
+        Directory.CreateDirectory(userDir);
+        var path = Path.Combine(userDir, $"{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}_{Util.Id()}_{safeName}");
+        await using var source = await OpenStoredObjectAsync(sourcePath);
+        await using var target = File.Create(path);
+        await source.CopyToAsync(target);
+        return path;
+    }
+
     public async Task<Project> CreateProjectAsync(int userId, ProjectCreate request)
     {
         Project? project = null;
@@ -422,6 +487,79 @@ public sealed class MaskFlowStore
             State.Projects.Add(updated);
         });
         return updated;
+    }
+
+    public async Task<Project?> CopyProjectAsync(int userId, string sourceProjectId, ProjectCopyRequest request)
+    {
+        Project? copied = null;
+        await SaveAsync(async () =>
+        {
+            var source = State.Projects.FirstOrDefault(x => x.Id == sourceProjectId && x.UserId == userId);
+            if (source is null) return;
+
+            var sourceFiles = State.Files
+                .Where(x => x.UserId == userId && x.ProjectId == sourceProjectId)
+                .OrderBy(x => x.CreatedAt)
+                .ToList();
+            var currentUser = GetUser(userId)!;
+            var copiedBytes = sourceFiles.Sum(x => x.Size);
+            if (currentUser.UsedBytes + copiedBytes > currentUser.QuotaBytes)
+            {
+                throw new BadHttpRequestException("Storage quota exceeded.", 403);
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var nextName = string.IsNullOrWhiteSpace(request.Name) ? $"{source.Name} 副本" : request.Name.Trim();
+            copied = new Project("proj_" + Util.Id(), userId, nextName, source.Description, source.DataType, source.Split, 0, 0, now, now);
+            State.Projects.Add(copied);
+
+            var sourceLabels = GetProjectLabels(userId, sourceProjectId).ToList();
+            State.ProjectLabels[copied.Id] = sourceLabels;
+            MarkProjectLabelsDirty(copied.Id);
+
+            var fileIdMap = new Dictionary<int, int>();
+            foreach (var sourceFile in sourceFiles)
+            {
+                var copiedPath = await CopyStoredObjectAsync(sourceFile.Path, userId, copied.Id, sourceFile.Name, sourceFile.ContentType);
+                var fileId = State.NextFileId++;
+                var copiedFile = new FileItem(
+                    fileId,
+                    userId,
+                    copied.Id,
+                    sourceFile.Name,
+                    copiedPath,
+                    sourceFile.Size,
+                    sourceFile.Kind,
+                    sourceFile.ContentType,
+                    sourceFile.CreatedAt,
+                    $"/api/files/{fileId}/download");
+                State.Files.Add(copiedFile);
+                fileIdMap[sourceFile.Id] = fileId;
+            }
+
+            foreach (var sourceSet in State.AnnotationSets.Where(x => x.UserId == userId && fileIdMap.ContainsKey(x.FileId)).ToList())
+            {
+                var nextFileId = fileIdMap[sourceSet.FileId];
+                var annotations = sourceSet.Annotations.Select(x => x with
+                {
+                    Bbox = x.Bbox with { },
+                    Segment = x.Segment is null ? null : x.Segment.ToList()
+                }).ToList();
+                State.AnnotationSets.Add(new AnnotationSet(
+                    "annset_" + Util.Id(),
+                    userId,
+                    nextFileId,
+                    sourceSet.Width,
+                    sourceSet.Height,
+                    annotations,
+                    BuildYoloTxt(annotations, copied.DataType),
+                    now,
+                    now));
+            }
+
+            ReplaceUser(currentUser with { UsedBytes = currentUser.UsedBytes + copiedBytes });
+        });
+        return copied;
     }
 
     public async Task<bool> DeleteProjectAsync(int userId, string projectId)
@@ -814,6 +952,21 @@ public sealed class MaskFlowStore
     public static string ResolveYoloTask(string? dataType) =>
         NormalizeDataType(dataType) == "segmentation" ? "segment" : "detect";
 
+    static string NormalizeExportFormat(string? format) => (format ?? "yolo").Trim().ToLowerInvariant() switch
+    {
+        "yolo-detect" or "detect" or "detection" => "yolo-detect",
+        "yolo-segment" or "segment" or "segmentation" => "yolo-segment",
+        "classification" or "classification-crops" or "crops" => "classification-crops",
+        _ => "yolo"
+    };
+
+    static string ExportDataType(string exportFormat, string projectDataType) => exportFormat switch
+    {
+        "yolo-detect" => "detection",
+        "yolo-segment" => "segmentation",
+        _ => projectDataType
+    };
+
     string ResolveProjectDataType(int userId, string? projectId)
     {
         if (projectId is null)
@@ -866,8 +1019,10 @@ public sealed class MaskFlowStore
                 throw new BadHttpRequestException("No annotated images found for export.", 400);
             }
 
+            var exportFormat = NormalizeExportFormat(request.Format);
             var projectDataType = ResolveProjectDataType(userId, request.ProjectId);
-            var yoloTask = ResolveYoloTask(projectDataType);
+            var exportDataType = ExportDataType(exportFormat, projectDataType);
+            var yoloTask = ResolveYoloTask(exportDataType);
 
             using (var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
             {
@@ -895,46 +1050,54 @@ public sealed class MaskFlowStore
                     }
                 }
 
-                for (var index = 0; index < labeledFiles.Count; index++)
+                if (exportFormat == "classification-crops")
                 {
-                    var file = labeledFiles[index];
-                    var targetSplit = SplitName(index, labeledFiles.Count, split);
-                    var extension = Path.GetExtension(file.Name);
-                    var stem = SanitizeFileName($"{file.Id}_{Path.GetFileNameWithoutExtension(file.Name)}");
-                    var imageEntry = archive.CreateEntry($"images/{targetSplit}/{stem}{extension}");
-                    await using (var imageEntryStream = imageEntry.Open())
-                    await using (var imageStream = await OpenStoredObjectAsync(file.Path))
+                    await WriteClassificationCropDatasetAsync(archive, labeledFiles, annotationMap, labels, split);
+                }
+                else
+                {
+                    for (var index = 0; index < labeledFiles.Count; index++)
                     {
-                        await imageStream.CopyToAsync(imageEntryStream);
+                        var file = labeledFiles[index];
+                        var targetSplit = SplitName(index, labeledFiles.Count, split);
+                        var extension = Path.GetExtension(file.Name);
+                        var stem = SanitizeFileName($"{file.Id}_{Path.GetFileNameWithoutExtension(file.Name)}");
+                        var imageEntry = archive.CreateEntry($"images/{targetSplit}/{stem}{extension}");
+                        await using (var imageEntryStream = imageEntry.Open())
+                        await using (var imageStream = await OpenStoredObjectAsync(file.Path))
+                        {
+                            await imageStream.CopyToAsync(imageEntryStream);
+                        }
+
+                        var labelEntry = archive.CreateEntry($"labels/{targetSplit}/{stem}.txt");
+                        using var labelWriter = new StreamWriter(labelEntry.Open());
+                        labelWriter.Write(BuildYoloTxt(annotationMap[file.Id].Annotations, exportDataType));
                     }
 
-                    var labelEntry = archive.CreateEntry($"labels/{targetSplit}/{stem}.txt");
-                    using var labelWriter = new StreamWriter(labelEntry.Open());
-                    labelWriter.Write(BuildYoloTxt(annotationMap[file.Id].Annotations, projectDataType));
-                }
-
-                var dataEntry = archive.CreateEntry("data.yaml");
-                using (var writer = new StreamWriter(dataEntry.Open()))
-                {
-                    writer.WriteLine("path: .");
-                    writer.WriteLine($"task: {yoloTask}");
-                    writer.WriteLine("train: images/train");
-                    writer.WriteLine("val: images/val");
-                    writer.WriteLine("test: images/test");
-                    writer.WriteLine($"nc: {labels.Count}");
-                    writer.WriteLine("names:");
-                    for (var i = 0; i < labels.Count; i++)
+                    var dataEntry = archive.CreateEntry("data.yaml");
+                    using (var writer = new StreamWriter(dataEntry.Open()))
                     {
-                        writer.WriteLine($"  {i}: {labels[i]}");
+                        writer.WriteLine("path: .");
+                        writer.WriteLine($"task: {yoloTask}");
+                        writer.WriteLine("train: images/train");
+                        writer.WriteLine("val: images/val");
+                        writer.WriteLine("test: images/test");
+                        writer.WriteLine($"nc: {labels.Count}");
+                        writer.WriteLine("names:");
+                        for (var i = 0; i < labels.Count; i++)
+                        {
+                            writer.WriteLine($"  {i}: {labels[i]}");
+                        }
                     }
                 }
 
                 var readme = archive.CreateEntry("README.md");
                 using var readmeWriter = new StreamWriter(readme.Open());
-                readmeWriter.WriteLine("# MaskFlow YOLO Dataset");
+                readmeWriter.WriteLine(exportFormat == "classification-crops" ? "# MaskFlow Classification Crop Dataset" : "# MaskFlow YOLO Dataset");
                 readmeWriter.WriteLine();
-                readmeWriter.WriteLine($"Task: {yoloTask}");
-                readmeWriter.WriteLine($"DataType: {projectDataType}");
+                readmeWriter.WriteLine($"Format: {exportFormat}");
+                readmeWriter.WriteLine($"Task: {(exportFormat == "classification-crops" ? "classify" : yoloTask)}");
+                readmeWriter.WriteLine($"DataType: {exportDataType}");
                 readmeWriter.WriteLine($"Images: {labeledFiles.Count}");
                 readmeWriter.WriteLine($"GeneratedAt: {DateTimeOffset.UtcNow:O}");
             }
@@ -959,10 +1122,76 @@ public sealed class MaskFlowStore
                 File.Delete(zipPath);
             }
 
-            export = new DatasetExport(exportId, userId, request.ProjectId, request.TaskId, "completed", exportPath, zipSize, request, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, $"/api/export/{exportId}/download");
+            export = new DatasetExport(exportId, userId, request.ProjectId, request.TaskId, "completed", exportPath, zipSize, request with { Format = exportFormat }, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, $"/api/export/{exportId}/download");
             State.Exports.Add(export);
         });
         return export!;
+    }
+
+    async Task WriteClassificationCropDatasetAsync(
+        ZipArchive archive,
+        IReadOnlyList<FileItem> labeledFiles,
+        IReadOnlyDictionary<int, AnnotationSet> annotationMap,
+        IReadOnlyList<string> labels,
+        SplitConfig split)
+    {
+        var samples = labeledFiles
+            .SelectMany(file => annotationMap[file.Id].Annotations
+                .Where(IsExportableAnnotation)
+                .Select(annotation => new { File = file, Annotation = annotation }))
+            .ToList();
+
+        if (samples.Count == 0)
+        {
+            throw new BadHttpRequestException("No labeled annotations found for classification export.", 400);
+        }
+
+        var classEntry = archive.CreateEntry("classes.txt");
+        using (var classWriter = new StreamWriter(classEntry.Open()))
+        {
+            foreach (var label in labels) classWriter.WriteLine(label);
+        }
+
+        var exported = 0;
+        var grouped = samples.GroupBy(x => x.File.Id).ToDictionary(x => x.Key, x => x.ToList());
+        foreach (var (fileId, fileSamples) in grouped)
+        {
+            var file = fileSamples[0].File;
+            await using var imageStream = await OpenStoredObjectAsync(file.Path);
+            using var image = await Image.LoadAsync(imageStream);
+            foreach (var sample in fileSamples)
+            {
+                var cropRect = BuildCropRectangle(sample.Annotation.Bbox, image.Width, image.Height);
+                if (cropRect.Width <= 0 || cropRect.Height <= 0) continue;
+
+                var targetSplit = SplitName(exported, samples.Count, split);
+                var labelDir = SanitizeFileName(sample.Annotation.Label ?? "unassigned");
+                var stem = SanitizeFileName($"{fileId}_{Path.GetFileNameWithoutExtension(file.Name)}_{sample.Annotation.Id}");
+                var cropEntry = archive.CreateEntry($"classification/{targetSplit}/{labelDir}/{stem}.jpg");
+                using var crop = image.Clone(ctx => ctx.Crop(cropRect));
+                await using var cropStream = cropEntry.Open();
+                await crop.SaveAsJpegAsync(cropStream, new JpegEncoder { Quality = 92 });
+                exported += 1;
+            }
+        }
+
+        if (exported == 0)
+        {
+            throw new BadHttpRequestException("No valid annotation crops found for classification export.", 400);
+        }
+    }
+
+    static Rectangle BuildCropRectangle(YoloBox box, int imageWidth, int imageHeight)
+    {
+        var left = Clamp01(box.Cx - box.Width / 2) * imageWidth;
+        var top = Clamp01(box.Cy - box.Height / 2) * imageHeight;
+        var right = Clamp01(box.Cx + box.Width / 2) * imageWidth;
+        var bottom = Clamp01(box.Cy + box.Height / 2) * imageHeight;
+        var x = Math.Clamp((int)Math.Floor(left), 0, Math.Max(0, imageWidth - 1));
+        var y = Math.Clamp((int)Math.Floor(top), 0, Math.Max(0, imageHeight - 1));
+        var width = Math.Clamp((int)Math.Ceiling(right) - x, 1, imageWidth - x);
+        var height = Math.Clamp((int)Math.Ceiling(bottom) - y, 1, imageHeight - y);
+        return new Rectangle(x, y, width, height);
     }
 
     public async Task<Stream> OpenStoredObjectAsync(string path)
@@ -1022,23 +1251,22 @@ public sealed class MaskFlowStore
         return (withoutScheme[..slash], withoutScheme[(slash + 1)..]);
     }
 
-    public async Task<IResult> SetJobStatusAsync(string jobId, string status)
+    public async Task<Job?> SetJobStatusAsync(string jobId, string status)
     {
-        IResult? result = null;
+        Job? result = null;
         await SaveAsync(() =>
         {
             var job = State.Jobs.FirstOrDefault(x => x.Id == jobId);
             if (job is null)
             {
-                result = Results.NotFound(new { detail = "Job not found" });
                 return;
             }
 
             State.Jobs.Remove(job);
-            State.Jobs.Add(job with { Status = status, FinishedAt = status is "cancelled" or "succeeded" or "failed" ? DateTimeOffset.UtcNow : null });
-            result = Results.Json(new { job = State.Jobs.First(x => x.Id == jobId) });
+            result = job with { Status = status, FinishedAt = status is "cancelled" or "succeeded" or "failed" ? DateTimeOffset.UtcNow : null };
+            State.Jobs.Add(result);
         });
-        return result!;
+        return result;
     }
 
     public async Task<object?> AddJobEventAsync(string jobId, JobEventCreate request)
@@ -1065,69 +1293,66 @@ public sealed class MaskFlowStore
         return result;
     }
 
-    public async Task<IResult> HeartbeatNodeAsync(string nodeId, NodeHeartbeat request)
+    public async Task<Node?> HeartbeatNodeAsync(string nodeId, NodeHeartbeat request)
     {
-        IResult? result = null;
+        Node? result = null;
         await SaveAsync(() =>
         {
             var node = State.Nodes.FirstOrDefault(x => x.Id == nodeId);
             if (node is null)
             {
-                result = Results.NotFound(new { detail = "Node not found" });
                 return;
             }
 
             State.Nodes.Remove(node);
-            State.Nodes.Add(node with { Status = request.Status, GpuModel = request.GpuModel ?? node.GpuModel, VramGb = request.VramGb ?? node.VramGb, Region = request.Region ?? node.Region, LastHeartbeat = DateTimeOffset.UtcNow });
-            result = Results.Json(new { node = State.Nodes.First(x => x.Id == nodeId).Public() });
+            result = node with { Status = request.Status, GpuModel = request.GpuModel ?? node.GpuModel, VramGb = request.VramGb ?? node.VramGb, Region = request.Region ?? node.Region, LastHeartbeat = DateTimeOffset.UtcNow };
+            State.Nodes.Add(result);
         });
-        return result!;
+        return result;
     }
 
-    public async Task<IResult> NodeStatusAsync(string nodeId, string status, bool approve = false)
+    public async Task<Node?> NodeStatusAsync(string nodeId, string status, bool approve = false)
     {
-        IResult? result = null;
+        Node? result = null;
         await SaveAsync(() =>
         {
             var node = State.Nodes.FirstOrDefault(x => x.Id == nodeId);
             if (node is null)
             {
-                result = Results.NotFound(new { detail = "Node not found" });
                 return;
             }
 
             State.Nodes.Remove(node);
-            State.Nodes.Add(node with { Status = status, ApprovedAt = approve ? DateTimeOffset.UtcNow : node.ApprovedAt, LastHeartbeat = DateTimeOffset.UtcNow });
-            result = Results.Json(new { node = State.Nodes.First(x => x.Id == nodeId).Public() });
+            result = node with { Status = status, ApprovedAt = approve ? DateTimeOffset.UtcNow : node.ApprovedAt, LastHeartbeat = DateTimeOffset.UtcNow };
+            State.Nodes.Add(result);
         });
-        return result!;
+        return result;
     }
 
-    public async Task<IResult> PollJobAsync(string nodeId)
+    public async Task<(bool NodeFound, Job? Job)> PollJobAsync(string nodeId)
     {
-        IResult? result = null;
+        var nodeFound = false;
+        Job? result = null;
         await SaveAsync(() =>
         {
             var node = State.Nodes.FirstOrDefault(x => x.Id == nodeId);
             if (node is null)
             {
-                result = Results.NotFound(new { detail = "Node not found" });
                 return;
             }
 
+            nodeFound = true;
             var job = State.Jobs.Where(x => x.Status == "queued").OrderBy(x => x.CreatedAt).FirstOrDefault();
             if (job is null)
             {
-                result = Results.Json(new { job = (object?)null });
                 return;
             }
 
             State.Jobs.Remove(job);
-            var running = job with { Status = "running", NodeId = nodeId, StartedAt = DateTimeOffset.UtcNow };
-            State.Jobs.Add(running);
-            result = Results.Json(new { job = running });
+            result = job with { Status = "running", NodeId = nodeId, StartedAt = DateTimeOffset.UtcNow };
+            State.Jobs.Add(result);
         });
-        return result!;
+        return (nodeFound, result);
     }
 
     public async Task<TaskItem> CreateTaskAsync(int userId, string type, string? title, string? projectId, int? fileId, int imageCount)

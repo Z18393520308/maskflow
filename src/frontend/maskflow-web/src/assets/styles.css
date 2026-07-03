@@ -5699,6 +5699,47 @@ body:has(.app-sidebar) {
   align-items: start;
 }
 
+.export-format-picker {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.export-format-picker label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  align-items: start;
+  padding: 10px;
+  border: 1px solid #dfe7f3;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.export-format-picker label.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.1);
+}
+
+.export-format-picker input {
+  grid-row: 1 / span 2;
+  margin-top: 3px;
+}
+
+.export-format-picker span {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.export-format-picker small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .export-split-form {
   display: grid;
   gap: 10px;
@@ -5850,7 +5891,7 @@ body:has(.app-sidebar) {
   position: relative;
   display: block;
   min-height: 62px;
-  padding-right: 34px;
+  padding-right: 58px;
 }
 
 .file-status-dot {
@@ -5865,6 +5906,29 @@ body:has(.app-sidebar) {
 
 .file-status-dot.done {
   background: #16a34a;
+}
+
+.queue-delete-btn {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  min-width: 36px;
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: #fff1f2;
+  color: #be123c;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.queue-delete-btn:hover {
+  background: #ffe4e6;
+  color: #9f1239;
 }
 
 .annotate-canvas-panel {

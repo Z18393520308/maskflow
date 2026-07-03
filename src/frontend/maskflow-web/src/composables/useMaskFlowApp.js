@@ -44,6 +44,7 @@ export function useMaskFlowApp() {
   const projects = reactive({ rows: [], selectedId: "", newName: "", newDataType: "detection", status: "" });
   const exportPage = reactive({
     tab: "config",
+    format: "yolo-detect",
     split: { train: 70, val: 20, test: 10 },
     status: "",
     rows: []
@@ -252,6 +253,45 @@ export function useMaskFlowApp() {
     projects.status = `项目 ${data.project.name} 已创建`;
     await refreshProjects();
     await refreshFiles();
+  }
+
+  async function copyCurrentProject() {
+    if (!projects.selectedId || !selectedProject.value) {
+      projects.status = "请先选择要复制的项目";
+      return;
+    }
+    if (!canLeaveCurrentAnnotation()) return;
+    const defaultName = `${selectedProject.value.name} 副本`;
+    const name = window.prompt("请输入复制后的新项目名称", defaultName);
+    if (name === null) return;
+    const cleanName = name.trim();
+    if (!cleanName) {
+      projects.status = "复制项目名称不能为空";
+      return;
+    }
+    loading.value = true;
+    projects.status = `正在复制项目 ${selectedProject.value.name}...`;
+    try {
+      const data = await apiFetch(`/api/projects/${projects.selectedId}/copy`, {
+        method: "POST",
+        body: { name: cleanName }
+      });
+      if (data.user) {
+        account.value = data.user;
+        saveSession({ ...session(), user: data.user });
+      }
+      projects.selectedId = data.project.id;
+      projects.status = `项目已复制为 ${data.project.name}`;
+      clearAnnotation();
+      annotate.current = null;
+      await refreshProjects();
+      await refreshFiles();
+      if (page.value === "export") await refreshExports();
+    } catch (error) {
+      projects.status = error.message;
+    } finally {
+      loading.value = false;
+    }
   }
 
   function syncExportSplitFromProject() {
@@ -538,16 +578,24 @@ export function useMaskFlowApp() {
   }
 
   async function deleteFile(fileId) {
+    const deletedIndex = files.rows.findIndex((file) => file.id === fileId);
+    const wasCurrent = annotate.current?.id === fileId;
     const data = await apiFetch(`/api/files/${fileId}`, { method: "DELETE" });
     if (data.user) {
       account.value = data.user;
       saveSession({ ...session(), user: data.user });
     }
-    if (annotate.current?.id === fileId) {
-      annotate.current = null;
-      clearAnnotation();
-    }
     await refreshFiles();
+    if (wasCurrent) {
+      const nextFile = files.rows[Math.min(deletedIndex, files.rows.length - 1)] || files.rows[deletedIndex - 1] || null;
+      if (nextFile) {
+        await selectAnnotateFile(nextFile);
+      } else {
+        annotate.current = null;
+        clearAnnotation();
+        annotate.status = "图片已删除，当前项目暂无图片";
+      }
+    }
   }
 
   async function runSegment() {
@@ -1422,7 +1470,7 @@ export function useMaskFlowApp() {
         method: "POST",
         body: {
           projectId: projects.selectedId,
-          format: "yolo",
+          format: exportPage.format,
           split: {
             train: Number(exportPage.split.train),
             val: Number(exportPage.split.val),
@@ -1587,7 +1635,7 @@ export function useMaskFlowApp() {
     setYoloZoom, resetYoloZoom, selectAdjacentFile, addAnnotateLabel, beginDeleteAnnotateLabel,
     confirmDeleteAnnotateLabel, cancelDeleteAnnotateLabel, canRunAnnotateAi, formatAnnotationLabel,
     applyLabelToActive, applyAnnotationLabel, syncBatchLabelsFromAnnotations, syncAnnotationLabels, changeAnnotateFiles,
-    previewUrl, downloadCurrentTxt, selectProject, createProject, deleteFile, deleteCurrentProject,
+    previewUrl, downloadCurrentTxt, selectProject, createProject, copyCurrentProject, deleteFile, deleteCurrentProject,
     createExport, exportSplitTotal, downloadExportItem, formatDateTime, needsLogin, uploadFiles,
     runSegment, selectSegmentFile, showSegmentOverlay, subscribe, saveSettings, changePassword,
     saveNotifications, createApiToken, revokeApiToken, addTeamMember, removeTeamMember, revokeDevice,
@@ -1638,6 +1686,7 @@ export function useMaskFlowApp() {
     needsLogin,
     refreshDashboard,
     createProject,
+    copyCurrentProject,
     selectProject,
     deleteCurrentProject,
     uploadFiles,

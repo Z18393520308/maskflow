@@ -14,6 +14,7 @@ public sealed class JobsController : ControllerBase
     }
 
     bool IsAdmin => HttpContext.Items.ContainsKey(MaskFlowHttpItems.AdminAccess);
+    string? NodeId => HttpContext.Items[MaskFlowHttpItems.NodeId] as string;
 
     User RequireScopedUser()
     {
@@ -23,6 +24,12 @@ public sealed class JobsController : ControllerBase
         }
 
         return store.RequireUser(HttpContext);
+    }
+
+    bool NodeCanWriteJob(string jobId)
+    {
+        var nodeId = NodeId;
+        return nodeId is not null && store.State.Jobs.Any(x => x.Id == jobId && x.NodeId == nodeId);
     }
 
     [HttpGet]
@@ -80,14 +87,24 @@ public sealed class JobsController : ControllerBase
     [HttpPost("{jobId}/status")]
     public async Task<IActionResult> SetStatus(string jobId, [FromBody] JsonElement body)
     {
+        if (!IsAdmin && !NodeCanWriteJob(jobId))
+        {
+            return NotFound(new { detail = "Job not found" });
+        }
+
         var status = body.TryGetProperty("status", out var s) ? s.GetString() ?? "queued" : "queued";
-        var result = await store.SetJobStatusAsync(jobId, status);
-        return new JsonResult(((Microsoft.AspNetCore.Http.HttpResults.JsonHttpResult<object>)result).Value) { StatusCode = 200 };
+        var job = await store.SetJobStatusAsync(jobId, status);
+        return job is null ? NotFound(new { detail = "Job not found" }) : Ok(new { job });
     }
 
     [HttpPost("{jobId}/events")]
     public async Task<IActionResult> AddEvent(string jobId, [FromBody] JobEventCreate request)
     {
+        if (!IsAdmin && !NodeCanWriteJob(jobId))
+        {
+            return NotFound(new { detail = "Job not found" });
+        }
+
         var result = await store.AddJobEventAsync(jobId, request);
         return result is null ? NotFound(new { detail = "Job not found" }) : Ok(result);
     }

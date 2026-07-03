@@ -35,6 +35,7 @@ public record SubscribeRequest(string Plan);
 public record ApiTokenCreate(string Name);
 public record TeamMemberCreate(string Email, string Role);
 public record ProjectCreate(string Name, string? Description, string? DataType, SplitConfig? Split);
+public record ProjectCopyRequest(string? Name);
 public record ProjectLabelsRequest(List<string> Labels);
 public record TaskCreate(string Type, string? Title, string? ProjectId, int? FileId, int ImageCount = 1);
 public record ExportRequest(string? ProjectId, string? TaskId, SplitConfig? Split, string Format = "yolo");

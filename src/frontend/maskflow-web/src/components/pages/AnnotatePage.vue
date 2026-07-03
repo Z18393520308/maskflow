@@ -28,6 +28,7 @@
           <option value="segmentation">实例分割</option>
         </select>
         <button class="btn compact-btn" type="button" @click="createProject">新建项目</button>
+        <button class="btn secondary compact-btn" type="button" :disabled="loading || !projects.selectedId" @click="copyCurrentProject">复制项目</button>
       </section>
 
       <section class="annotate-topbar">
@@ -71,6 +72,7 @@
             <button v-for="file in filteredFiles" :key="file.id" :class="['file-row-btn', { active: annotate.current?.id === file.id }]" type="button" @click="selectAnnotateFile(file)">
               <span>{{ file.name }}</span>
               <small>{{ formatBytes(file.size) }} · {{ file.annotated ? file.annotationCount + ' 条标注' : '未标注' }}</small>
+              <i class="queue-delete-btn" title="删除图片" @click.stop="deleteAnnotateFile(file)">删除</i>
               <b :class="['file-status-dot', { done: file.annotated }]" title="已执行自动标注"></b>
             </button>
             <div v-if="!filteredFiles.length" class="empty-note">当前筛选下没有图片。</div>
@@ -86,6 +88,7 @@
             <button class="btn secondary compact-btn" type="button" :disabled="currentFileIndex <= 0" @click="selectAdjacentFile(-1)">上一张</button>
             <span>{{ currentFileIndex >= 0 ? currentFileIndex + 1 : 0 }} / {{ files.rows.length }} · {{ annotate.current?.name || '未选择图片' }}</span>
             <button class="btn secondary compact-btn" type="button" :disabled="currentFileIndex < 0 || currentFileIndex >= files.rows.length - 1" @click="selectAdjacentFile(1)">下一张</button>
+            <button class="btn danger compact-btn" type="button" :disabled="loading || !annotate.current" @click="deleteCurrentAnnotateFile">删除图片</button>
           </div>
           <div v-if="annotate.current" class="yolo-canvas">
             <div
@@ -304,10 +307,12 @@ const applyLabelToActive = inject("applyLabelToActive");
 const applyAnnotationLabel = inject("applyAnnotationLabel");
 const toggleAnnotationConfirmed = inject("toggleAnnotationConfirmed");
 const changeAnnotateFiles = inject("changeAnnotateFiles");
+const deleteFile = inject("deleteFile");
 const previewUrl = inject("previewUrl");
 const downloadCurrentTxt = inject("downloadCurrentTxt");
 const selectProject = inject("selectProject");
 const createProject = inject("createProject");
+const copyCurrentProject = inject("copyCurrentProject");
 const createExport = inject("createExport");
 const currentFileIndex = inject("currentFileIndex");
 const activeAnnotation = inject("activeAnnotation");
@@ -325,5 +330,18 @@ const annotationRowAccentStyle = inject("annotationRowAccentStyle");
 
 function onAnnotationLabelChange(item, value) {
   applyAnnotationLabel(item, value);
+}
+
+async function deleteAnnotateFile(file) {
+  if (!file?.id) return;
+  const message = file.annotated
+    ? `确定删除 ${file.name} 吗？这张图的 ${file.annotationCount || 0} 条标注也会一起删除。`
+    : `确定删除 ${file.name} 吗？`;
+  if (!window.confirm(message)) return;
+  await deleteFile(file.id);
+}
+
+async function deleteCurrentAnnotateFile() {
+  await deleteAnnotateFile(annotate.current);
 }
 </script>
