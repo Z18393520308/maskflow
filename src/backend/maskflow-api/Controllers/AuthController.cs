@@ -24,6 +24,11 @@ public sealed class AuthController : ControllerBase
             return BadRequest(new { detail = "Email and password are required." });
         }
 
+        if (request.Password.Length < 8)
+        {
+            return BadRequest(new { detail = "Password must be at least 8 characters." });
+        }
+
         var result = await store.RegisterAsync(request.Email, request.Password, request.Username, HttpContext);
         return result is null ? Conflict(new { detail = "Email already exists." }) : Ok(result);
     }

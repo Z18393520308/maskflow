@@ -30,6 +30,11 @@ public sealed class AccountController : MaskFlowControllerBase
     [HttpPost("/api/account/password")]
     public async Task<IActionResult> ChangePassword([FromBody] PasswordChangeRequest request)
     {
+        if (string.IsNullOrWhiteSpace(request.NewPassword) || request.NewPassword.Length < 8)
+        {
+            return BadRequest(new { detail = "New password must be at least 8 characters." });
+        }
+
         var user = CurrentUser();
         var changed = await Store.ChangePasswordAsync(user.Id, request.CurrentPassword, request.NewPassword, MaskFlowStore.ExtractBearerToken(HttpContext));
         return changed ? Ok(new { ok = true }) : BadRequest(new { detail = "Current password is incorrect." });

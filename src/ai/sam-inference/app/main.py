@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -59,21 +60,24 @@ app = FastAPI(title="SAM 3 Backend")
 
 @app.middleware("http")
 async def verify_internal_key(request: Request, call_next):
-    if request.url.path.startswith("/api/"):
+    if request.url.path.startswith("/api/") and (REQUIRE_INTERNAL_KEY or INTERNAL_KEY):
         if not INTERNAL_KEY:
             return JSONResponse(
                 status_code=503,
                 content={"detail": "SAM3_INTERNAL_KEY is not configured."},
             )
         provided = request.headers.get("X-Internal-Key", "")
-        if provided != INTERNAL_KEY:
+        if not hmac.compare_digest(provided, INTERNAL_KEY):
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
     return await call_next(request)
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("SAM3_CORS_ORIGINS", "*").split(","),
+    allow_origins=os.getenv(
+        "SAM3_CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(","),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
