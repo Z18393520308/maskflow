@@ -1877,8 +1877,13 @@ export function useMaskFlowApp() {
   }
 
   function setYoloZoom(value) {
-    annotate.zoom = Math.max(0.25, Math.min(3, Number(value) || 1));
-    if (annotate.zoom === 1) nextTick(updateYoloFrame);
+    const next = Math.max(0.25, Math.min(3, Number(value) || 1));
+    annotate.zoom = Math.round(next * 100) / 100;
+    // Keep the fitted base size; only re-fit when returning to 100% / 适配.
+    if (Math.abs(annotate.zoom - 1) < 0.001) {
+      annotate.zoom = 1;
+      nextTick(updateYoloFrame);
+    }
   }
 
   function resetYoloZoom() {

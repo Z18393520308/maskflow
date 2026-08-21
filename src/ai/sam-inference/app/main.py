@@ -465,6 +465,62 @@ def _as_float_mask(mask: np.ndarray) -> np.ndarray:
     return array.astype(np.float32, copy=False)
 
 
+def _odd_kernel(size: int, minimum: int = 3) -> int:
+    value = max(minimum, int(size))
+    return value if value % 2 == 1 else value + 1
+
+
+def _refine_binary_mask(mask: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Upsample, soft-blur and morphologically smooth a SAM mask to reduce jagged edges."""
+    soft = cv2.resize(_as_float_mask(mask), (width, height), interpolation=cv2.INTER_CUBIC)
+    blur_k = _odd_kernel(max(3, round(min(width, height) * 0.004)))
+    soft = cv2.GaussianBlur(soft, (blur_k, blur_k), 0)
+    binary = (soft > 0.5).astype(np.uint8)
+    if not np.any(binary):
+        return binary
+
+    morph_k = _odd_kernel(max(3, round(min(width, height) * 0.005)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_k, morph_k))
+    # Close fills tiny bites along the rim; open removes speckles sticking out.
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+    return binary
+
+
+def _smooth_contour_points(contour: np.ndarray, window: int = 7) -> np.ndarray:
+    """Circular moving-average to soften stair-step contour vertices."""
+    points = contour.reshape(-1, 2).astype(np.float64)
+    count = len(points)
+    if count < max(6, window * 2):
+        return contour
+
+    radius = max(1, window // 2)
+    smoothed = np.empty_like(points)
+    for index in range(count):
+        indices = [(index + offset) % count for offset in range(-radius, radius + 1)]
+        smoothed[index] = points[indices].mean(axis=0)
+
+    return np.round(smoothed).astype(np.int32).reshape(-1, 1, 2)
+
+
+def _contours_from_binary(binary: np.ndarray) -> list[np.ndarray]:
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    refined: list[np.ndarray] = []
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        if area < 20:
+            continue
+        perimeter = float(cv2.arcLength(contour, True))
+        window = _odd_kernel(max(5, round(perimeter * 0.01)), minimum=5)
+        smoothed = _smooth_contour_points(contour, window=window)
+        # Light Douglas-Peucker keeps curves smooth without reintroducing jagged steps.
+        epsilon = max(0.6, 0.0008 * cv2.arcLength(smoothed, True))
+        approx = cv2.approxPolyDP(smoothed, epsilon, True)
+        if len(approx) >= 3:
+            refined.append(approx)
+    return refined
+
+
 def _render_overlay(image: Image.Image, masks: list[np.ndarray]) -> str:
     rgb = np.array(image)
     overlay = rgb.copy()
@@ -479,18 +535,16 @@ def _render_overlay(image: Image.Image, masks: list[np.ndarray]) -> str:
     ]
 
     for index, mask in enumerate(masks):
-        resized = cv2.resize(_as_float_mask(mask), (width, height), interpolation=cv2.INTER_LINEAR)
-        binary = resized > 0.5
+        binary = _refine_binary_mask(mask, width, height)
         if not np.any(binary):
             continue
 
         color = np.array(colors[index % len(colors)], dtype=np.uint8)
-        overlay[binary] = (overlay[binary] * 0.48 + color * 0.52).astype(np.uint8)
+        overlay[binary.astype(bool)] = (overlay[binary.astype(bool)] * 0.48 + color * 0.52).astype(np.uint8)
 
-        contours, _ = cv2.findContours(
-            binary.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        cv2.drawContours(overlay, contours, -1, tuple(int(c) for c in color), 2)
+        contours = _contours_from_binary(binary)
+        if contours:
+            cv2.drawContours(overlay, contours, -1, tuple(int(c) for c in color), 2)
 
     output = Image.fromarray(overlay)
     buffer = io.BytesIO()
@@ -499,21 +553,16 @@ def _render_overlay(image: Image.Image, masks: list[np.ndarray]) -> str:
 
 
 def _mask_to_geometry(mask: np.ndarray, width: int, height: int) -> dict[str, Any] | None:
-    resized = cv2.resize(_as_float_mask(mask), (width, height), interpolation=cv2.INTER_LINEAR)
-    binary = (resized > 0.5).astype(np.uint8)
+    binary = _refine_binary_mask(mask, width, height)
     if not np.any(binary):
         return None
 
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = _contours_from_binary(binary)
     polygons: list[list[list[float]]] = []
     yolo_segments: list[list[float]] = []
 
     for contour in contours:
-        area = float(cv2.contourArea(contour))
-        if area < 20:
-            continue
-        epsilon = max(1.0, 0.002 * cv2.arcLength(contour, True))
-        approx = cv2.approxPolyDP(contour, epsilon, True).reshape(-1, 2)
+        approx = contour.reshape(-1, 2)
         if len(approx) < 3:
             continue
 
@@ -529,7 +578,7 @@ def _mask_to_geometry(mask: np.ndarray, width: int, height: int) -> dict[str, An
         polygons.append(polygon)
         yolo_segments.append(segment)
 
-    bbox = _mask_bbox(resized)
+    bbox = _mask_bbox(binary.astype(np.float32))
     if bbox is None or not polygons:
         return None
 

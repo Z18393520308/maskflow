@@ -4458,9 +4458,11 @@ body:has(.app-sidebar) {
   display: block;
   align-items: center;
   justify-content: center;
-  max-width: 100%;
-  max-height: 100%;
-  flex: 0 1 auto;
+  /* Zoom is applied via explicit width/height; do not clamp to the viewport
+     or zoom values above 100% cannot enlarge the canvas. */
+  max-width: none;
+  max-height: none;
+  flex: 0 0 auto;
 }
 
 .yolo-image-frame img {
@@ -6136,7 +6138,7 @@ body:has(.app-sidebar) {
 
 .annotate-canvas-panel .yolo-canvas {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   height: 100%;
   overflow: auto;
@@ -6148,8 +6150,8 @@ body:has(.app-sidebar) {
   position: relative;
   flex: 0 0 auto;
   margin: auto;
-  max-width: 100%;
-  max-height: 100%;
+  max-width: none;
+  max-height: none;
   box-shadow: 0 18px 50px rgba(15, 23, 42, 0.16);
 }
 

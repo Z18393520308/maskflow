@@ -4,10 +4,10 @@ MaskFlow 是一个面向图像数据集的 **AI 自动标注平台**。用户可
 
 ## 功能概览
 
-- 用户注册 / 登录、账户与套餐管理
+- 用户注册 / 登录、忘记密码找回、账户与套餐管理
 - 项目管理、图片上传与文件管理
-- **SAM 3 自动分割**（文本提示或全自动识别）
-- **YOLO 标注工作台**（单张 / 批量自动标注、标签管理、保存与导出）
+- **SAM 3 自动分割**（文本提示、全自动识别、点提示正负点击抠图）
+- **YOLO 标注工作台**（单张 / 批量自动标注、标签管理、画布缩放、保存与导出）
 - 数据集导出（YOLO 目录结构 + ZIP）
 - 处理任务记录、AI 调用额度
 - ComputeHub 算力调度接口预留（`/v1/*`）
@@ -155,6 +155,12 @@ docker compose up -d --build
 # 仅重建并更新前端 / 后端（MySQL、SAM、MinIO 不动）
 docker compose up -d --build api web
 
+# 更新分割边缘平滑 / 点提示等 AI 改动时，需重建 SAM
+docker compose up -d --build sam-inference
+
+# 同时更新前端 + API + SAM（常见发版组合）
+docker compose up -d --build api web sam-inference
+
 # 查看状态 / 日志
 docker compose ps
 docker compose logs -f api
@@ -168,6 +174,21 @@ docker compose logs -f api
 | SAM | maskflow-sam-inference | http://localhost:8001 |
 | MinIO Console | maskflow-minio | http://localhost:9001 |
 
+### 部署相关环境变量（节选）
+
+| 变量 | 说明 | 默认建议 |
+|------|------|----------|
+| `ASPNETCORE_ENVIRONMENT` | `Development` 跳过部分生产密钥强校验 | 本机 `Development` |
+| `MASKFLOW_PASSWORD_RESET_INLINE` | `true` 时忘记密码接口回显重置码（未接邮件） | `true`（本机/内网） |
+| `MASKFLOW_ADMIN_API_KEY` | 管理接口 `X-Admin-Key` | 生产务必改成强随机值 |
+| `SAM3_INTERNAL_KEY` | API ↔ SAM 内部调用密钥 | 与 SAM 容器一致 |
+| `MASKFLOW_AI_DAILY_LIMIT` | AI 日额度覆盖 | 按需 |
+| `MASKFLOW_BILLING_DEV_MODE` | 本地套餐测试开关 | 生产设为 `false` |
+
+忘记密码说明：当前默认不发邮件。本机 Docker / Development 会在页面内回显重置码；生产若仍无 SMTP，需显式设置 `MASKFLOW_PASSWORD_RESET_INLINE=true`，或改为接入邮件后再关闭回显。
+
+发版后建议强制刷新前端（Ctrl+F5）。边缘平滑与点提示改动只更新 `sam-inference` 即可；忘记密码改动需同时更新 `api` + `web`。
+
 ## 主要 API
 
 业务接口（节选）：
@@ -175,16 +196,20 @@ docker compose logs -f api
 ```text
 POST /api/auth/register
 POST /api/auth/login
+POST /api/auth/forgot-password
+POST /api/auth/reset-password
 GET  /api/projects
 POST /api/files/upload
 POST /api/segment
+POST /api/segment/points
 POST /api/annotations/auto
+POST /api/annotations/points
 POST /api/export/dataset
 GET  /api/tasks
 GET  /api/ai/quota
 ```
 
-完整接口见 Swagger 文档。
+完整接口见 Swagger 文档。更多变更说明见 [`文档/修改记录.md`](文档/修改记录.md)。
 
 ## 开发说明
 
