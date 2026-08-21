@@ -15,21 +15,27 @@
 </div>
 
 <p align="center">
-  <a href="./docs/screenshots/sam-point-prompt.png">
-    <img src="./docs/screenshots/sam-point-prompt.png" alt="MaskFlow SAM 3 点提示分割工作台" width="100%" />
+  <a href="./docs/screenshots/yolo-annotation-workbench.png">
+    <img src="./docs/screenshots/yolo-annotation-workbench.png" alt="MaskFlow YOLO 标注与点提示复核工作台" width="100%" />
   </a>
 </p>
 
-<p align="center">用正负点、文本或自动模式生成分割结果，在同一套工作流中完成标注复核与数据集导出。</p>
+<p align="center">在项目级工作台中完成批量 AI 标注、正负点精修、标签管理、人工确认与 YOLO 导出。</p>
 
 <table>
   <tr>
-    <td width="33%" align="center"><strong>项目控制台</strong></td>
-    <td width="33%" align="center"><strong>批量图片管理</strong></td>
-    <td width="33%" align="center"><strong>多格式数据集导出</strong></td>
+    <td width="50%" align="center"><strong>SAM 3 点提示分割</strong></td>
+    <td width="50%" align="center"><strong>项目控制台</strong></td>
   </tr>
   <tr>
+    <td><a href="./docs/screenshots/sam-point-prompt.png"><img src="./docs/screenshots/sam-point-prompt.png" alt="MaskFlow SAM 3 点提示分割工作台" /></a></td>
     <td><a href="./docs/screenshots/dashboard.png"><img src="./docs/screenshots/dashboard.png" alt="MaskFlow 项目控制台" /></a></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>批量图片管理</strong></td>
+    <td align="center"><strong>多格式数据集导出</strong></td>
+  </tr>
+  <tr>
     <td><a href="./docs/screenshots/upload-manager.png"><img src="./docs/screenshots/upload-manager.png" alt="MaskFlow 图片上传和文件管理" /></a></td>
     <td><a href="./docs/screenshots/dataset-export.png"><img src="./docs/screenshots/dataset-export.png" alt="MaskFlow 数据集导出" /></a></td>
   </tr>
