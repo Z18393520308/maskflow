@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -28,6 +29,9 @@ public sealed class MaskFlowStore
     bool UseMinio => !string.IsNullOrWhiteSpace(MinioEndpoint);
     public MaskFlowState State { get; private set; } = new();
     readonly HashSet<string> pendingProjectLabelSync = new(StringComparer.Ordinal);
+    readonly ConcurrentDictionary<string, PasswordResetEntry> passwordResetTokens = new(StringComparer.OrdinalIgnoreCase);
+
+    sealed record PasswordResetEntry(string TokenHash, DateTimeOffset ExpiresAt);
 
     public MaskFlowStore(IMaskFlowRepository repository)
     {
@@ -275,6 +279,82 @@ public sealed class MaskFlowStore
         });
         return changed;
     }
+
+    public string? CreatePasswordResetToken(string email)
+    {
+        var normalizedEmail = email.Trim().ToLowerInvariant();
+        var user = State.Users.FirstOrDefault(x => x.Email == normalizedEmail);
+        if (user is null)
+        {
+            return null;
+        }
+
+        var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+        passwordResetTokens[normalizedEmail] = new PasswordResetEntry(Util.Sha256(token), DateTimeOffset.UtcNow.AddMinutes(30));
+        return token;
+    }
+
+    public async Task<bool> ResetPasswordWithTokenAsync(string email, string token, string newPassword)
+    {
+        var normalizedEmail = email.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(token) || string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 8)
+        {
+            return false;
+        }
+
+        if (!passwordResetTokens.TryGetValue(normalizedEmail, out var entry)
+            || entry.ExpiresAt < DateTimeOffset.UtcNow
+            || !CryptographicOperations.FixedTimeEquals(
+                Encoding.ASCII.GetBytes(entry.TokenHash),
+                Encoding.ASCII.GetBytes(Util.Sha256(token.Trim()))))
+        {
+            return false;
+        }
+
+        var user = State.Users.FirstOrDefault(x => x.Email == normalizedEmail);
+        if (user is null)
+        {
+            return false;
+        }
+
+        var changed = false;
+        await SaveAsync(() =>
+        {
+            var current = State.Users.FirstOrDefault(x => x.Email == normalizedEmail);
+            if (current is null)
+            {
+                return;
+            }
+
+            var salt = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+            State.Users.Remove(current);
+            State.Users.Add(current with { Salt = salt, PasswordHash = HashPassword(newPassword, salt) });
+            InvalidateSessions(current.Id, null);
+            changed = true;
+        });
+
+        if (changed)
+        {
+            passwordResetTokens.TryRemove(normalizedEmail, out _);
+        }
+
+        return changed;
+    }
+
+    static bool ShouldExposePasswordResetToken()
+    {
+        var env = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "";
+        if (env.Equals("Development", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var flag = Environment.GetEnvironmentVariable("MASKFLOW_PASSWORD_RESET_INLINE");
+        return string.Equals(flag, "true", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(flag, "1", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public bool PasswordResetReturnsToken => ShouldExposePasswordResetToken();
 
     static int ResolveDailyLimit(string plan)
     {

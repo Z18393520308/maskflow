@@ -16,6 +16,17 @@ import {
 } from "../lib/yoloFormat";
 import heroPreviewRoad from "../assets/hero-preview-road.png";
 
+function createEmptyPointDraft() {
+  return {
+    points: [],
+    candidates: [],
+    activeCandidate: 0,
+    overlay: "",
+    requestId: 0,
+    loading: false
+  };
+}
+
 export function useMaskFlowApp() {
   const routes = {
     "/": "home",
@@ -37,7 +48,14 @@ export function useMaskFlowApp() {
   const message = ref("");
   const loading = ref(false);
 
-  const auth = reactive({ mode: new URLSearchParams(location.search).get("mode") || "login", email: "", username: "", password: "" });
+  const auth = reactive({
+    mode: new URLSearchParams(location.search).get("mode") || "login",
+    email: "",
+    username: "",
+    password: "",
+    confirmPassword: "",
+    resetToken: ""
+  });
   const dashboard = reactive({ projects: [], tasks: [], quota: null });
   const files = reactive({ rows: [], selected: null });
   const records = reactive({ rows: [] });
@@ -53,7 +71,27 @@ export function useMaskFlowApp() {
   const selectedProjectDataType = computed(() => normalizeProjectDataType(selectedProject.value?.dataType));
   const selectedProjectDataTypeLabel = computed(() => projectDataTypeLabel(selectedProject.value?.dataType));
   const selectedProjectExportHint = computed(() => projectYoloExportHint(selectedProject.value?.dataType));
-  const segment = reactive({ file: null, preview: "", prompt: "", conf: 0.25, overlay: "", overlays: {}, activeOverlay: "all", categories: [], status: "准备就绪", warning: "", mode: "", count: 0 });
+  const segment = reactive({
+    file: null,
+    preview: "",
+    prompt: "",
+    conf: 0.25,
+    overlay: "",
+    overlays: {},
+    activeOverlay: "all",
+    categories: [],
+    status: "准备就绪",
+    warning: "",
+    mode: "",
+    count: 0,
+    promptMode: "auto",
+    width: 0,
+    height: 0,
+    pointPolarity: 1,
+    pointDraft: createEmptyPointDraft(),
+    confirmed: [],
+    activeConfirmedId: ""
+  });
   const annotate = reactive({
     selected: null,
     fileId: null,
@@ -77,6 +115,9 @@ export function useMaskFlowApp() {
     filter: "all",
     drawMode: false,
     drawingBox: null,
+    pointMode: false,
+    pointPolarity: 1,
+    pointDraft: createEmptyPointDraft(),
     reviewFilterOpen: false,
     reviewFilterGlobalMatches: null,
     reviewFilters: {
@@ -190,6 +231,7 @@ export function useMaskFlowApp() {
   }
 
   async function submitAuth() {
+    if (auth.mode === "forgot" || auth.mode === "reset") return;
     loading.value = true;
     message.value = "";
     try {
@@ -202,6 +244,70 @@ export function useMaskFlowApp() {
       account.value = data.user;
       const redirect = new URLSearchParams(location.search).get("redirect");
       go(redirect && redirect.startsWith("/") ? redirect : "/dashboard.html");
+    } catch (error) {
+      message.value = error.message;
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  function openForgotPassword() {
+    auth.mode = "forgot";
+    auth.password = "";
+    auth.confirmPassword = "";
+    auth.resetToken = "";
+    message.value = "";
+  }
+
+  async function submitForgotPassword() {
+    loading.value = true;
+    message.value = "";
+    try {
+      const data = await apiFetch("/api/auth/forgot-password", {
+        method: "POST",
+        body: { email: auth.email }
+      });
+      if (data.resetToken) {
+        auth.resetToken = data.resetToken;
+        auth.mode = "reset";
+        auth.password = "";
+        auth.confirmPassword = "";
+        message.value = data.message || "请设置新密码完成重置。";
+      } else {
+        message.value = data.message || "如果邮箱存在，请按提示完成重置。";
+      }
+    } catch (error) {
+      message.value = error.message;
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  async function submitResetPassword() {
+    if (auth.password !== auth.confirmPassword) {
+      message.value = "两次输入的新密码不一致";
+      return;
+    }
+    if ((auth.password || "").length < 8) {
+      message.value = "新密码至少 8 位";
+      return;
+    }
+    loading.value = true;
+    message.value = "";
+    try {
+      const data = await apiFetch("/api/auth/reset-password", {
+        method: "POST",
+        body: {
+          email: auth.email,
+          token: auth.resetToken,
+          newPassword: auth.password
+        }
+      });
+      auth.mode = "login";
+      auth.password = "";
+      auth.confirmPassword = "";
+      auth.resetToken = "";
+      message.value = data.message || "密码已重置，请登录。";
     } catch (error) {
       message.value = error.message;
     } finally {
@@ -603,6 +709,10 @@ export function useMaskFlowApp() {
       segment.status = "请先选择一张图片";
       return;
     }
+    if (segment.promptMode === "points") {
+      segment.status = "点提示模式下请直接在图片上点击，无需点「开始分割」";
+      return;
+    }
     loading.value = true;
     segment.status = "AI 正在分割";
     segment.overlay = "";
@@ -615,7 +725,7 @@ export function useMaskFlowApp() {
     try {
       const form = new FormData();
       form.append("image", segment.file);
-      form.append("prompt", segment.prompt);
+      form.append("prompt", segment.promptMode === "text" ? segment.prompt : "");
       form.append("conf", String(segment.conf));
       form.append("half", "true");
       const data = await apiFetch("/api/segment", { method: "POST", body: form });
@@ -636,6 +746,14 @@ export function useMaskFlowApp() {
     }
   }
 
+  function resetSegmentPointDraft() {
+    Object.assign(segment.pointDraft, createEmptyPointDraft());
+  }
+
+  function resetAnnotatePointDraft() {
+    Object.assign(annotate.pointDraft, createEmptyPointDraft());
+  }
+
   function selectSegmentFile(file) {
     if (segment.preview) URL.revokeObjectURL(segment.preview);
     segment.file = file || null;
@@ -647,13 +765,371 @@ export function useMaskFlowApp() {
     segment.warning = "";
     segment.mode = "";
     segment.count = 0;
-    segment.status = file ? "图片已选择，可以开始分割" : "准备就绪";
+    segment.width = 0;
+    segment.height = 0;
+    segment.confirmed = [];
+    segment.activeConfirmedId = "";
+    resetSegmentPointDraft();
+    segment.status = file
+      ? segment.promptMode === "points"
+        ? "图片已选择，点击目标内部添加正向点"
+        : "图片已选择，可以开始分割"
+      : "准备就绪";
+  }
+
+  function onSegmentImageLoad(event) {
+    const image = event?.target;
+    if (!image?.naturalWidth) return;
+    segment.width = image.naturalWidth;
+    segment.height = image.naturalHeight;
+  }
+
+  function setSegmentPromptMode(mode) {
+    segment.promptMode = mode;
+    resetSegmentPointDraft();
+    if (mode === "points") {
+      segment.overlay = "";
+      segment.status = segment.file ? "点提示模式：左键正向点，右键负向点" : "请先选择图片";
+    } else {
+      segment.status = segment.file ? "图片已选择，可以开始分割" : "准备就绪";
+    }
   }
 
   function showSegmentOverlay(key) {
     if (!segment.overlays?.[key]) return;
     segment.activeOverlay = key;
     segment.overlay = segment.overlays[key];
+  }
+
+  function pickLargestYoloSegment(candidate) {
+    const segments = candidate?.yoloSegments;
+    if (!Array.isArray(segments) || !segments.length) return null;
+    let best = segments[0];
+    let bestLen = Array.isArray(best) ? best.length : 0;
+    for (const item of segments) {
+      if (Array.isArray(item) && item.length > bestLen) {
+        best = item;
+        bestLen = item.length;
+      }
+    }
+    return Array.isArray(best) && best.length >= 6 ? best.map(Number) : null;
+  }
+
+  function activePointCandidate(draft) {
+    if (!draft?.candidates?.length) return null;
+    const index = Math.max(0, Math.min(draft.candidates.length - 1, draft.activeCandidate || 0));
+    return draft.candidates[index] || null;
+  }
+
+  function applyPointPromptResult(draft, data, requestId) {
+    if (requestId !== draft.requestId) return false;
+    draft.candidates = data.candidates || [];
+    draft.activeCandidate = 0;
+    draft.overlay = draft.candidates[0]?.overlay || data.overlay || "";
+    draft.loading = false;
+    return true;
+  }
+
+  let segmentPointRequestChain = Promise.resolve();
+  let annotatePointRequestChain = Promise.resolve();
+
+  async function requestSegmentPointPrompt() {
+    if (!segment.file || !segment.pointDraft.points.length) return;
+    if (!segment.pointDraft.points.some((point) => point.label === 1)) {
+      segment.status = "请至少添加一个正向点";
+      return;
+    }
+
+    const snapshotPoints = segment.pointDraft.points.map((point) => ({ ...point }));
+    const requestId = ++segment.pointDraft.requestId;
+    segment.pointDraft.loading = true;
+    segment.status = "AI 正在根据提示点分割...";
+
+    const run = async () => {
+      // Only the latest click should hit the GPU; skip superseded snapshots.
+      if (requestId !== segment.pointDraft.requestId) return;
+      try {
+        const form = new FormData();
+        form.append("image", segment.file);
+        form.append("points", JSON.stringify(snapshotPoints.map((point) => [point.x, point.y])));
+        form.append("labels", JSON.stringify(snapshotPoints.map((point) => point.label)));
+        form.append("conf", String(segment.conf));
+        const data = await apiFetch("/api/segment/points", { method: "POST", body: form });
+        if (!applyPointPromptResult(segment.pointDraft, data, requestId)) return;
+        if (data.width) segment.width = data.width;
+        if (data.height) segment.height = data.height;
+        segment.activeConfirmedId = "";
+        segment.overlay = segment.pointDraft.overlay;
+        segment.mode = "points";
+        segment.count = data.count || segment.pointDraft.candidates.length;
+        segment.status = segment.pointDraft.candidates.length
+          ? "当前目标 Mask 已更新，可继续加点精修，或确认目标"
+          : `已生成 ${segment.pointDraft.candidates.length} 个候选 Mask，可切换或继续加点`;
+      } catch (error) {
+        if (requestId !== segment.pointDraft.requestId) return;
+        segment.pointDraft.loading = false;
+        segment.status = error.message;
+      }
+    };
+
+    segmentPointRequestChain = segmentPointRequestChain.then(run, run);
+    await segmentPointRequestChain;
+  }
+
+  async function requestAnnotatePointPrompt() {
+    if (!annotate.current?.id || !annotate.pointDraft.points.length) return;
+    if (!annotate.pointDraft.points.some((point) => point.label === 1)) {
+      annotate.status = "请至少添加一个正向点";
+      return;
+    }
+
+    const snapshotPoints = annotate.pointDraft.points.map((point) => ({ ...point }));
+    const fileId = annotate.current.id;
+    const requestId = ++annotate.pointDraft.requestId;
+    annotate.pointDraft.loading = true;
+    annotate.status = "AI 正在根据提示点分割...";
+
+    const run = async () => {
+      if (requestId !== annotate.pointDraft.requestId) return;
+      try {
+        const data = await apiFetch("/api/annotations/points", {
+          method: "POST",
+          body: {
+            fileId,
+            points: snapshotPoints.map((point) => [point.x, point.y]),
+            labels: snapshotPoints.map((point) => point.label),
+            conf: Number(annotate.conf)
+          }
+        });
+        if (!applyPointPromptResult(annotate.pointDraft, data, requestId)) return;
+        if (data.width) annotate.width = data.width;
+        if (data.height) annotate.height = data.height;
+        annotate.status = "当前目标 Mask 已更新，可继续加点精修，或确认目标";
+      } catch (error) {
+        if (requestId !== annotate.pointDraft.requestId) return;
+        annotate.pointDraft.loading = false;
+        annotate.status = error.message;
+      }
+    };
+
+    annotatePointRequestChain = annotatePointRequestChain.then(run, run);
+    await annotatePointRequestChain;
+  }
+
+  function pointerToPixelPoint(event, width, height) {
+    const normalized = pointerToYoloPoint(event);
+    if (!normalized || !width || !height) return null;
+    return {
+      x: normalized.x * width,
+      y: normalized.y * height
+    };
+  }
+
+  function addPromptPoint(draft, pixel, label) {
+    draft.points.push({
+      id: `pt_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
+      x: pixel.x,
+      y: pixel.y,
+      label
+    });
+  }
+
+  async function handleSegmentPointClick(event) {
+    if (segment.promptMode !== "points" || !segment.file) return;
+    if (event.button !== undefined && event.button !== 0 && event.button !== 2) return;
+    event.preventDefault();
+    const width = segment.width || event.currentTarget?.querySelector?.("img")?.naturalWidth;
+    const height = segment.height || event.currentTarget?.querySelector?.("img")?.naturalHeight;
+    const pixel = pointerToPixelPoint(event, width, height);
+    if (!pixel) return;
+    const label = event.button === 2 || event.shiftKey ? 0 : segment.pointPolarity;
+    addPromptPoint(segment.pointDraft, pixel, label);
+    await requestSegmentPointPrompt();
+  }
+
+  async function handleAnnotatePointClick(event) {
+    if (!annotate.pointMode || annotate.drawMode || !annotate.current) return;
+    if (event.button !== undefined && event.button !== 0 && event.button !== 2) return;
+    event.preventDefault();
+    const width = annotate.width || event.currentTarget?.querySelector?.("img")?.naturalWidth;
+    const height = annotate.height || event.currentTarget?.querySelector?.("img")?.naturalHeight;
+    const pixel = pointerToPixelPoint(event, width, height);
+    if (!pixel) {
+      annotate.status = "无法定位点击坐标，请等图片加载完成";
+      return;
+    }
+    if (!annotate.width && width) annotate.width = width;
+    if (!annotate.height && height) annotate.height = height;
+    const label = event.button === 2 || event.shiftKey ? 0 : annotate.pointPolarity;
+    addPromptPoint(annotate.pointDraft, pixel, label);
+    await requestAnnotatePointPrompt();
+  }
+
+  function selectSegmentPointCandidate(index) {
+    if (!segment.pointDraft.candidates[index]) return;
+    segment.pointDraft.activeCandidate = index;
+    segment.pointDraft.overlay = segment.pointDraft.candidates[index].overlay || "";
+    segment.overlay = segment.pointDraft.overlay;
+  }
+
+  function selectAnnotatePointCandidate(index) {
+    if (!annotate.pointDraft.candidates[index]) return;
+    annotate.pointDraft.activeCandidate = index;
+    annotate.pointDraft.overlay = annotate.pointDraft.candidates[index].overlay || "";
+  }
+
+  function clearSegmentPointDraft() {
+    resetSegmentPointDraft();
+    segment.overlay = "";
+    segment.status = "已清空提示点，可重新点击当前目标";
+  }
+
+  function clearAnnotatePointDraft() {
+    resetAnnotatePointDraft();
+    annotate.status = "已清空提示点，可重新点击当前目标";
+  }
+
+  function segmentCanvasSrc() {
+    if (segment.promptMode !== "points") {
+      return segment.overlay || segment.preview || "";
+    }
+    if (segment.pointDraft.overlay) return segment.pointDraft.overlay;
+    if (segment.activeConfirmedId) {
+      const selected = segment.confirmed.find((item) => item.id === segment.activeConfirmedId);
+      if (selected?.overlay) return selected.overlay;
+    }
+    return segment.overlay || segment.preview || "";
+  }
+
+  function previewConfirmedSegmentTarget(targetId) {
+    const selected = segment.confirmed.find((item) => item.id === targetId);
+    if (!selected?.overlay) {
+      segment.status = "该目标没有可预览的 Mask";
+      return;
+    }
+    segment.activeConfirmedId = targetId;
+    segment.overlay = selected.overlay;
+    // Leave draft points as-is, but hide draft overlay so confirmed preview wins.
+    segment.pointDraft.overlay = "";
+    segment.pointDraft.candidates = [];
+    segment.pointDraft.activeCandidate = 0;
+    const index = segment.confirmed.findIndex((item) => item.id === targetId);
+    segment.status = `正在预览已确认目标 ${index + 1}`;
+  }
+
+  function startNewSegmentPointTarget() {
+    resetSegmentPointDraft();
+    segment.activeConfirmedId = "";
+    segment.overlay = "";
+    segment.status = "已开始新目标：请点击正向点开始抠下一个物体";
+  }
+
+  function startNewAnnotatePointTarget() {
+    resetAnnotatePointDraft();
+    annotate.status = "已开始新目标：请点击正向点开始抠下一个物体";
+  }
+
+  function confirmSegmentPointTarget() {
+    const candidate = activePointCandidate(segment.pointDraft);
+    if (!candidate) {
+      segment.status = "请先通过点击生成 Mask";
+      return;
+    }
+    segment.confirmed.push({
+      id: `seg_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
+      score: candidate.score,
+      overlay: candidate.overlay,
+      yoloBox: candidate.yoloBox,
+      yoloSegments: candidate.yoloSegments,
+      area: candidate.area
+    });
+    const confirmedId = segment.confirmed.at(-1).id;
+    resetSegmentPointDraft();
+    segment.activeConfirmedId = confirmedId;
+    segment.overlay = candidate.overlay || "";
+    segment.status = `已确认目标 ${segment.confirmed.length}。点击右侧列表可预览；要抠下一个请先点「新建目标」`;
+  }
+
+  function confirmAnnotatePointTarget() {
+    const candidate = activePointCandidate(annotate.pointDraft);
+    if (!candidate?.yoloBox) {
+      annotate.status = "请先通过点击生成 Mask";
+      return;
+    }
+    const segmentCoords = pickLargestYoloSegment(candidate);
+    const label = manualAnnotationLabel();
+    const item = normalizeAnnotationItem({
+      id: `point_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+      classId: findLabelIndex(label),
+      label,
+      bbox: {
+        cx: Number(candidate.yoloBox.cx),
+        cy: Number(candidate.yoloBox.cy),
+        width: Number(candidate.yoloBox.width),
+        height: Number(candidate.yoloBox.height)
+      },
+      segment: segmentCoords,
+      confidence: Number(candidate.score || 1),
+      confirmed: false
+    });
+    annotate.annotations.push(item);
+    annotate.activeId = item.id;
+    resetAnnotatePointDraft();
+    markAnnotationDirty(
+      segmentCoords
+        ? label
+          ? `已确认 ${label}（框+掩膜）。下一个物体请先点「新建目标」`
+          : "已确认目标（框+掩膜）。下一个物体请先点「新建目标」"
+        : label
+          ? `已确认 ${label}（仅框）。下一个物体请先点「新建目标」`
+          : "已确认目标（仅框）。下一个物体请先点「新建目标」"
+    );
+  }
+
+  function togglePointPromptMode() {
+    annotate.pointMode = !annotate.pointMode;
+    if (annotate.pointMode) {
+      annotate.drawMode = false;
+      annotate.drawingBox = null;
+      annotate.status = "点提示：多个正负点精修同一个目标；确认后需「新建目标」再抠下一个";
+    } else {
+      resetAnnotatePointDraft();
+      annotate.status = "点提示模式已关闭";
+    }
+  }
+
+  function setAnnotatePointPolarity(value) {
+    annotate.pointPolarity = value === 0 ? 0 : 1;
+  }
+
+  function setSegmentPointPolarity(value) {
+    segment.pointPolarity = value === 0 ? 0 : 1;
+  }
+
+  function promptPointStyle(point, width, height) {
+    if (!width || !height) return { display: "none" };
+    return {
+      left: `${(point.x / width) * 100}%`,
+      top: `${(point.y / height) * 100}%`
+    };
+  }
+
+  function activeAnnotatePointCandidate() {
+    return activePointCandidate(annotate.pointDraft);
+  }
+
+  function activeSegmentPointCandidate() {
+    return activePointCandidate(segment.pointDraft);
+  }
+
+  function candidatePolygonPoints(candidate) {
+    const segmentCoords = pickLargestYoloSegment(candidate);
+    if (!segmentCoords?.length) return "";
+    const points = [];
+    for (let i = 0; i < segmentCoords.length - 1; i += 2) {
+      points.push(`${segmentCoords[i] * 100},${segmentCoords[i + 1] * 100}`);
+    }
+    return points.join(" ");
   }
 
   function applyAnnotation(annotation, options = {}) {
@@ -1066,6 +1542,7 @@ export function useMaskFlowApp() {
     annotate.current = file;
     annotate.fileId = file?.id || null;
     clearAnnotation();
+    resetAnnotatePointDraft();
     annotate.dirty = false;
     annotate.savedAt = null;
     annotate.zoom = 1;
@@ -1075,7 +1552,9 @@ export function useMaskFlowApp() {
     }
     annotate.status = file.annotated
       ? "正在加载已保存标注"
-      : "图片已选择，可单张分割标注或批量标注全部图片";
+      : annotate.pointMode
+        ? "图片已选择，点提示模式可点击抠图"
+        : "图片已选择，可单张分割标注或批量标注全部图片";
     try {
       await loadAnnotatePreview(file);
     } catch (error) {
@@ -1089,7 +1568,7 @@ export function useMaskFlowApp() {
         clearAnnotation();
       }
     } else {
-      markAnnotationSaved("图片已选择，等待自动标注");
+      markAnnotationSaved(annotate.pointMode ? "点提示模式：点击目标开始抠图" : "图片已选择，等待自动标注");
     }
   }
 
@@ -1271,9 +1750,11 @@ export function useMaskFlowApp() {
   }));
 
   function updateYoloFrame(event) {
-    const image = event?.target || document.querySelector(".annotate-canvas-panel .yolo-image-frame img");
+    const image = event?.target || document.querySelector(".annotate-canvas-panel .yolo-image-frame img:not(.point-mask-overlay)");
     const canvas = image?.closest?.(".yolo-canvas");
     if (!image || !canvas || !image.naturalWidth || !image.naturalHeight) return;
+    annotate.width = image.naturalWidth;
+    annotate.height = image.naturalHeight;
     const canvasStyle = getComputedStyle(canvas);
     const paddingX = parseFloat(canvasStyle.paddingLeft) + parseFloat(canvasStyle.paddingRight);
     const paddingY = parseFloat(canvasStyle.paddingTop) + parseFloat(canvasStyle.paddingBottom);
@@ -1386,7 +1867,13 @@ export function useMaskFlowApp() {
   function toggleManualDrawMode() {
     annotate.drawMode = !annotate.drawMode;
     annotate.drawingBox = null;
-    annotate.status = annotate.drawMode ? "画框模式已开启：在图片上拖拽补一个目标框" : "画框模式已关闭";
+    if (annotate.drawMode) {
+      annotate.pointMode = false;
+      resetAnnotatePointDraft();
+      annotate.status = "画框模式已开启：在图片上拖拽补一个目标框";
+    } else {
+      annotate.status = "画框模式已关闭";
+    }
   }
 
   function setYoloZoom(value) {
@@ -1623,13 +2110,21 @@ export function useMaskFlowApp() {
 
   const providers = {
     page, auth, go, logout, homeFeatures, heroPreviewRoad, message, loading, uploadQueue, uploadQueueStatusLabel,
-    submitAuth, annotate, projects, selectedProject, selectedProjectDataType, selectedProjectDataTypeLabel, selectedProjectExportHint, files, filteredFiles, account, formatBytes, dashboard, records,
+    submitAuth, openForgotPassword, submitForgotPassword, submitResetPassword, annotate, projects, selectedProject, selectedProjectDataType, selectedProjectDataTypeLabel, selectedProjectExportHint, files, filteredFiles, account, formatBytes, dashboard, records,
     segment, settings, settingsTabs, billingPlans, billingExplain, billingFaqs, exportPage,
     saveSession, session, authHeaders, selectAnnotateFile, runCurrentMask, runMasks, saveAnnotation,
     removeAnnotation, toggleAnnotationConfirmed, activeAnnotation, annotationStats, currentFileIndex,
     saveStateText, yoloTxt, annotationBoxStyle, annotationPolygonStyle, labelChipStyle, labelSwatchStyle,
     annotationRowAccentStyle, labelColor, segmentPoints, yoloFrameStyle, updateYoloFrame,
     drawingBoxStyle, beginManualBox, updateManualBox, finishManualBox, cancelManualBox, toggleManualDrawMode,
+    togglePointPromptMode, setAnnotatePointPolarity, setSegmentPointPolarity, setSegmentPromptMode,
+    handleAnnotatePointClick, handleSegmentPointClick, onSegmentImageLoad,
+    selectAnnotatePointCandidate, selectSegmentPointCandidate,
+    clearAnnotatePointDraft, clearSegmentPointDraft,
+    confirmAnnotatePointTarget, confirmSegmentPointTarget,
+    startNewAnnotatePointTarget, startNewSegmentPointTarget,
+    previewConfirmedSegmentTarget, segmentCanvasSrc,
+    promptPointStyle, activeAnnotatePointCandidate, activeSegmentPointCandidate, candidatePolygonPoints,
     reviewFilterActive, reviewFilterMatchedAnnotations, collectReviewFilterMatches,
     resetReviewFilters, toggleReviewFilterPanel, deleteReviewFilterMatches,
     setYoloZoom, resetYoloZoom, selectAdjacentFile, addAnnotateLabel, beginDeleteAnnotateLabel,
@@ -1675,6 +2170,9 @@ export function useMaskFlowApp() {
     homeFeatures,
     heroPreviewRoad,
     submitAuth,
+    openForgotPassword,
+    submitForgotPassword,
+    submitResetPassword,
     uploadQueue,
     uploadQueueStatusLabel,
     filteredFiles,

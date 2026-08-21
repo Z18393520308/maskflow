@@ -47,6 +47,30 @@ public sealed class SegmentationController : ControllerBase
         return result.Response;
     }
 
+    [HttpPost("/api/segment/points")]
+    public async Task<IActionResult> SegmentPoints()
+    {
+        var user = store.RequireUser(HttpContext);
+        try
+        {
+            store.EnsureAiQuotaAvailable(user);
+        }
+        catch (BadHttpRequestException ex)
+        {
+            return StatusCode(ex.StatusCode, new { detail = ex.Message });
+        }
+
+        await using var slot = await samGate.TryAcquireAsync(HttpContext.RequestAborted);
+        if (slot is null)
+        {
+            return StatusCode(StatusCodes.Status429TooManyRequests, new { detail = "Too many concurrent AI requests. Try again shortly." });
+        }
+
+        var result = await ForwardMultipartAsync("/api/segment/points");
+        if (result.Success) await store.ConsumeAiQuotaAsync(user.Id, 1);
+        return result.Response;
+    }
+
     private async Task<IActionResult> ForwardGetAsync(string path)
     {
         try

@@ -85,6 +85,16 @@
             <button :class="['btn compact-btn', annotate.drawMode ? 'active-tool' : 'secondary']" type="button" :disabled="!annotate.current" @click="toggleManualDrawMode">
               {{ annotate.drawMode ? '退出画框' : '手动画框' }}
             </button>
+            <button :class="['btn compact-btn', annotate.pointMode ? 'active-tool' : 'secondary']" type="button" :disabled="!annotate.current" @click="togglePointPromptMode">
+              {{ annotate.pointMode ? '退出点提示' : '点提示抠图' }}
+            </button>
+            <template v-if="annotate.pointMode">
+              <button :class="['btn compact-btn', annotate.pointPolarity === 1 ? 'active-tool' : 'secondary']" type="button" @click="setAnnotatePointPolarity(1)">正向点</button>
+              <button :class="['btn compact-btn', annotate.pointPolarity === 0 ? 'active-tool' : 'secondary']" type="button" @click="setAnnotatePointPolarity(0)">负向点</button>
+              <button class="btn compact-btn" type="button" :disabled="!annotate.pointDraft.candidates.length" @click="confirmAnnotatePointTarget">确认目标</button>
+              <button class="btn secondary compact-btn" type="button" @click="startNewAnnotatePointTarget">新建目标</button>
+              <button class="btn secondary compact-btn" type="button" :disabled="!annotate.pointDraft.points.length" @click="clearAnnotatePointDraft">清空点</button>
+            </template>
             <button class="btn secondary compact-btn" type="button" :disabled="currentFileIndex <= 0" @click="selectAdjacentFile(-1)">上一张</button>
             <span>{{ currentFileIndex >= 0 ? currentFileIndex + 1 : 0 }} / {{ files.rows.length }} · {{ annotate.current?.name || '未选择图片' }}</span>
             <button class="btn secondary compact-btn" type="button" :disabled="currentFileIndex < 0 || currentFileIndex >= files.rows.length - 1" @click="selectAdjacentFile(1)">下一张</button>
@@ -93,15 +103,22 @@
           <div v-if="annotate.current" class="yolo-canvas">
             <div
               v-if="previewUrl(annotate.current)"
-              :class="['yolo-image-frame', { drawing: annotate.drawMode }]"
+              :class="['yolo-image-frame', { drawing: annotate.drawMode, pointing: annotate.pointMode }]"
               :style="yoloFrameStyle"
-              @pointerdown="beginManualBox"
+              @pointerdown="annotate.pointMode ? handleAnnotatePointClick($event) : beginManualBox($event)"
               @pointermove="updateManualBox"
               @pointerup="finishManualBox"
               @pointercancel="cancelManualBox"
               @pointerleave="updateManualBox"
+              @contextmenu.prevent
             >
               <img :src="previewUrl(annotate.current)" alt="标注图片" @load="updateYoloFrame" />
+              <img
+                v-if="annotate.pointMode && annotate.pointDraft.overlay"
+                class="point-mask-overlay"
+                :src="annotate.pointDraft.overlay"
+                alt="点提示 Mask"
+              />
               <div v-if="annotate.drawingBox" class="manual-draw-box" :style="drawingBoxStyle()"></div>
               <svg class="yolo-mask-layer" viewBox="0 0 100 100" preserveAspectRatio="none">
                 <polygon
@@ -111,7 +128,19 @@
                   :class="{ active: annotate.activeId === item.id, unassigned: !item.label }"
                   :style="annotationPolygonStyle(item)"
                 />
+                <polygon
+                  v-if="annotate.pointMode && activeAnnotatePointCandidate()"
+                  class="point-draft-polygon"
+                  :points="candidatePolygonPoints(activeAnnotatePointCandidate())"
+                />
               </svg>
+              <span
+                v-for="point in annotate.pointDraft.points"
+                :key="point.id"
+                :class="['prompt-point', point.label === 1 ? 'positive' : 'negative']"
+                :style="promptPointStyle(point, annotate.width, annotate.height)"
+                :title="point.label === 1 ? '正向点' : '负向点'"
+              />
               <button
                 v-for="item in annotate.annotations"
                 :key="item.id"
@@ -124,6 +153,10 @@
               </button>
             </div>
             <div v-else class="empty-note">正在加载图片预览...</div>
+            <div v-if="annotate.pointMode && annotate.pointDraft.candidates.length" class="point-candidate-bar">
+              <span>当前目标 Mask 已更新（多个正负点共同形成一个结果）</span>
+              <span v-if="annotate.pointDraft.loading">更新中...</span>
+            </div>
           </div>
           <div v-else class="canvas-empty">
             <strong>选择图片开始标注</strong>
@@ -293,6 +326,16 @@ const updateManualBox = inject("updateManualBox");
 const finishManualBox = inject("finishManualBox");
 const cancelManualBox = inject("cancelManualBox");
 const toggleManualDrawMode = inject("toggleManualDrawMode");
+const togglePointPromptMode = inject("togglePointPromptMode");
+const setAnnotatePointPolarity = inject("setAnnotatePointPolarity");
+const handleAnnotatePointClick = inject("handleAnnotatePointClick");
+const selectAnnotatePointCandidate = inject("selectAnnotatePointCandidate");
+const clearAnnotatePointDraft = inject("clearAnnotatePointDraft");
+const confirmAnnotatePointTarget = inject("confirmAnnotatePointTarget");
+const startNewAnnotatePointTarget = inject("startNewAnnotatePointTarget");
+const promptPointStyle = inject("promptPointStyle");
+const activeAnnotatePointCandidate = inject("activeAnnotatePointCandidate");
+const candidatePolygonPoints = inject("candidatePolygonPoints");
 const reviewFilterActive = inject("reviewFilterActive");
 const reviewFilterMatchedAnnotations = inject("reviewFilterMatchedAnnotations");
 const collectReviewFilterMatches = inject("collectReviewFilterMatches");

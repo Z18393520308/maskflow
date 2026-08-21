@@ -29,6 +29,8 @@ public record MaskFlowState
 
 public record RegisterRequest(string Email, string Password, string? Username);
 public record LoginRequest(string Email, string Password);
+public record ForgotPasswordRequest(string Email);
+public record ResetPasswordRequest(string Email, string Token, string NewPassword);
 public record ProfileRequest(string? Username, string? Phone);
 public record PasswordChangeRequest(string CurrentPassword, string NewPassword);
 public record SubscribeRequest(string Plan);
@@ -40,6 +42,7 @@ public record ProjectLabelsRequest(List<string> Labels);
 public record TaskCreate(string Type, string? Title, string? ProjectId, int? FileId, int ImageCount = 1);
 public record ExportRequest(string? ProjectId, string? TaskId, SplitConfig? Split, string Format = "yolo");
 public record AnnotationAutoRequest(int FileId, double Conf = 0.25, string? DefaultLabel = null);
+public record AnnotationPointsRequest(int FileId, List<double[]> Points, List<int> Labels, double Conf = 0.25);
 public record AnnotationSaveRequest(int FileId, int Width, int Height, List<AnnotationItem> Annotations);
 public record JobCreate(string Type, int UserId, string? ProjectId, Dictionary<string, object?> Input, Dictionary<string, object?> Params);
 public record JobEventCreate(string EventType, Dictionary<string, object?> Payload, string? Status, double? Progress, string? Error);

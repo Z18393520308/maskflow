@@ -49,4 +49,77 @@ public sealed class AuthController : ControllerBase
         loginRateLimiter.RecordSuccess(rateKey);
         return Ok(result);
     }
+
+    [AllowAnonymous]
+    [HttpPost("forgot-password")]
+    public IActionResult ForgotPassword([FromBody] ForgotPasswordRequest? request)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.Email))
+        {
+            return BadRequest(new { detail = "Email is required." });
+        }
+
+        var rateKey = $"forgot:{HttpContext.Connection.RemoteIpAddress}:{request.Email.Trim().ToLowerInvariant()}";
+        if (loginRateLimiter.IsLocked(rateKey, out var retryAfterSeconds))
+        {
+            Response.Headers.RetryAfter = retryAfterSeconds.ToString();
+            return StatusCode(429, new { detail = $"Too many reset attempts. Retry after {retryAfterSeconds} seconds." });
+        }
+
+        loginRateLimiter.RecordFailure(rateKey);
+        var token = store.CreatePasswordResetToken(request.Email);
+
+        // Always acknowledge the request to avoid email enumeration.
+        if (token is not null && store.PasswordResetReturnsToken)
+        {
+            return Ok(new
+            {
+                ok = true,
+                message = "已生成重置码（30 分钟内有效）。请设置新密码完成找回。",
+                resetToken = token,
+                delivery = "inline"
+            });
+        }
+
+        return Ok(new
+        {
+            ok = true,
+            message = "如果该邮箱已注册，请使用重置码完成密码重置。当前环境未开启重置码回显时，请联系管理员或配置 MASKFLOW_PASSWORD_RESET_INLINE=true。"
+        });
+    }
+
+    [AllowAnonymous]
+    [HttpPost("reset-password")]
+    public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest? request)
+    {
+        if (request is null
+            || string.IsNullOrWhiteSpace(request.Email)
+            || string.IsNullOrWhiteSpace(request.Token)
+            || string.IsNullOrWhiteSpace(request.NewPassword))
+        {
+            return BadRequest(new { detail = "Email, token and newPassword are required." });
+        }
+
+        if (request.NewPassword.Length < 8)
+        {
+            return BadRequest(new { detail = "Password must be at least 8 characters." });
+        }
+
+        var rateKey = $"reset:{HttpContext.Connection.RemoteIpAddress}:{request.Email.Trim().ToLowerInvariant()}";
+        if (loginRateLimiter.IsLocked(rateKey, out var retryAfterSeconds))
+        {
+            Response.Headers.RetryAfter = retryAfterSeconds.ToString();
+            return StatusCode(429, new { detail = $"Too many reset attempts. Retry after {retryAfterSeconds} seconds." });
+        }
+
+        var changed = await store.ResetPasswordWithTokenAsync(request.Email, request.Token, request.NewPassword);
+        if (!changed)
+        {
+            loginRateLimiter.RecordFailure(rateKey);
+            return BadRequest(new { detail = "重置码无效或已过期，请重新获取。" });
+        }
+
+        loginRateLimiter.RecordSuccess(rateKey);
+        return Ok(new { ok = true, message = "密码已重置，请使用新密码登录。" });
+    }
 }

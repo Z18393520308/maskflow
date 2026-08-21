@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
+import json
 import os
 import re
 import tempfile
 import threading
-import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,7 @@ _auto_model: Any | None = None
 _clip_model: Any | None = None
 _clip_preprocess: Any | None = None
 _model_lock = threading.Lock()
+_inference_lock = threading.Lock()
 
 AUTO_LABEL_CANDIDATES = [
     "person",
@@ -311,25 +313,44 @@ def _get_clip() -> tuple[Any, Any]:
     return _clip_model, _clip_preprocess
 
 
-def _image_to_temp_file(upload: UploadFile, content: bytes) -> tuple[Path, Image.Image]:
+def _pil_from_bytes(content: bytes) -> Image.Image:
     try:
         image = Image.open(io.BytesIO(content))
-        image = ImageOps.exif_transpose(image).convert("RGB")
+        return ImageOps.exif_transpose(image).convert("RGB")
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Uploaded file is not a valid image.") from exc
 
-    suffix = Path(upload.filename or "image.jpg").suffix.lower()
+
+def _save_inference_temp(image: Image.Image, suffix: str = ".jpg") -> tuple[Path, float]:
+    """Save a thumbnail for inference. Returns (path, scale) where scale maps original → inference pixels."""
     if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
         suffix = ".jpg"
 
+    original_w, original_h = image.size
     inference_image = image.copy()
     inference_image.thumbnail((MAX_INFERENCE_SIDE, MAX_INFERENCE_SIDE), Image.Resampling.LANCZOS)
+    inf_w, _ = inference_image.size
+    scale = float(inf_w) / float(max(original_w, 1))
 
     temp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     temp_path = Path(temp.name)
     temp.close()
     inference_image.save(temp_path)
+    return temp_path, scale
+
+
+def _image_to_temp_file(upload: UploadFile, content: bytes) -> tuple[Path, Image.Image]:
+    image = _pil_from_bytes(content)
+    suffix = Path(upload.filename or "image.jpg").suffix.lower()
+    temp_path, _scale = _save_inference_temp(image, suffix)
     return temp_path, image
+
+
+def _image_to_temp_file_with_scale(upload: UploadFile, content: bytes) -> tuple[Path, Image.Image, float]:
+    image = _pil_from_bytes(content)
+    suffix = Path(upload.filename or "image.jpg").suffix.lower()
+    temp_path, scale = _save_inference_temp(image, suffix)
+    return temp_path, image, scale
 
 
 def _parse_prompt_labels(prompt: str) -> list[str]:
@@ -436,6 +457,14 @@ def _classify_masks(image: Image.Image, masks: list[np.ndarray]) -> list[str]:
     return labels
 
 
+def _as_float_mask(mask: np.ndarray) -> np.ndarray:
+    """OpenCV resize does not accept bool masks; normalize to float32 in [0, 1]."""
+    array = np.asarray(mask)
+    if array.dtype == np.bool_ or array.dtype == bool:
+        return array.astype(np.float32)
+    return array.astype(np.float32, copy=False)
+
+
 def _render_overlay(image: Image.Image, masks: list[np.ndarray]) -> str:
     rgb = np.array(image)
     overlay = rgb.copy()
@@ -450,7 +479,7 @@ def _render_overlay(image: Image.Image, masks: list[np.ndarray]) -> str:
     ]
 
     for index, mask in enumerate(masks):
-        resized = cv2.resize(mask, (width, height), interpolation=cv2.INTER_LINEAR)
+        resized = cv2.resize(_as_float_mask(mask), (width, height), interpolation=cv2.INTER_LINEAR)
         binary = resized > 0.5
         if not np.any(binary):
             continue
@@ -470,7 +499,7 @@ def _render_overlay(image: Image.Image, masks: list[np.ndarray]) -> str:
 
 
 def _mask_to_geometry(mask: np.ndarray, width: int, height: int) -> dict[str, Any] | None:
-    resized = cv2.resize(mask, (width, height), interpolation=cv2.INTER_LINEAR)
+    resized = cv2.resize(_as_float_mask(mask), (width, height), interpolation=cv2.INTER_LINEAR)
     binary = (resized > 0.5).astype(np.uint8)
     if not np.any(binary):
         return None
@@ -647,15 +676,86 @@ async def annotation_masks(
     return result
 
 
+def _parse_point_prompt_payload(points_raw: str, labels_raw: str) -> tuple[list[list[float]], list[int]]:
+    try:
+        points_data = json.loads(points_raw) if isinstance(points_raw, str) else points_raw
+        labels_data = json.loads(labels_raw) if isinstance(labels_raw, str) else labels_raw
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="points/labels must be valid JSON.") from exc
+
+    if not isinstance(points_data, list) or not isinstance(labels_data, list):
+        raise HTTPException(status_code=400, detail="points and labels must be JSON arrays.")
+    if len(points_data) == 0:
+        raise HTTPException(status_code=400, detail="At least one prompt point is required.")
+    if len(points_data) != len(labels_data):
+        raise HTTPException(status_code=400, detail="points and labels length must match.")
+
+    points: list[list[float]] = []
+    labels: list[int] = []
+    for point, label in zip(points_data, labels_data):
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            raise HTTPException(status_code=400, detail="Each point must be [x, y] in original pixels.")
+        try:
+            x = float(point[0])
+            y = float(point[1])
+            label_int = int(label)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid point or label value.") from exc
+        if label_int not in (0, 1):
+            raise HTTPException(status_code=400, detail="Point labels must be 0 (negative) or 1 (positive).")
+        points.append([x, y])
+        labels.append(label_int)
+
+    if 1 not in labels:
+        raise HTTPException(status_code=400, detail="At least one positive point (label=1) is required.")
+
+    return points, labels
+
+
+@app.post("/api/segment/points")
+async def segment_points(
+    image: UploadFile = File(...),
+    points: str = Form(...),
+    labels: str = Form(...),
+    conf: float = Form(0.25),
+) -> dict[str, Any]:
+    """Interactive point-prompt segmentation. points/labels are original-image pixel coords."""
+    if not 0.01 <= conf <= 0.95:
+        raise HTTPException(status_code=400, detail="Confidence must be between 0.01 and 0.95.")
+
+    point_coords, point_labels = _parse_point_prompt_payload(points, labels)
+    content = await image.read()
+    temp_path, pil_image, scale = _image_to_temp_file_with_scale(image, content)
+
+    try:
+        result = await run_in_threadpool(
+            _run_point_segmentation,
+            temp_path,
+            pil_image,
+            point_coords,
+            point_labels,
+            conf,
+            scale,
+        )
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    return result
+
+
 def _run_auto_predict(temp_path: Path, conf: float) -> Any:
     model = _get_auto_model()
-    return model.predict(
-        source=str(temp_path),
-        conf=conf,
-        device=_get_device(),
-        retina_masks=True,
-        verbose=False,
-    )
+    with _inference_lock:
+        return model.predict(
+            source=str(temp_path),
+            conf=conf,
+            device=_get_device(),
+            retina_masks=True,
+            verbose=False,
+        )
 
 
 def _run_segmentation(
@@ -672,8 +772,9 @@ def _run_segmentation(
             predictor = _get_predictor(conf=conf, half=half)
             if hasattr(predictor, "args"):
                 predictor.args.conf = conf
-            predictor.set_image(str(temp_path))
-            results = predictor(text=prompt_labels)
+            with _inference_lock:
+                predictor.set_image(str(temp_path))
+                results = predictor(text=prompt_labels)
             mode = "text"
             instances = _extract_instances(results, fallback_labels=prompt_labels)
         else:
@@ -722,4 +823,104 @@ def _run_annotation_masks(temp_path: Path, pil_image: Image.Image, conf: float) 
         "height": height,
         "count": len(masks),
         "masks": masks,
+    }
+
+
+def _extract_mask_arrays(results: Any) -> tuple[list[np.ndarray], list[float]]:
+    masks: list[np.ndarray] = []
+    scores: list[float] = []
+
+    for result in results or []:
+        result_masks = getattr(result, "masks", None)
+        if result_masks is None or getattr(result_masks, "data", None) is None:
+            continue
+
+        data = result_masks.data
+        try:
+            data = data.detach().cpu().numpy()
+        except AttributeError:
+            data = np.asarray(data)
+
+        if data.ndim == 2:
+            data = data[None, :, :]
+
+        result_scores: list[float] = []
+        boxes = getattr(result, "boxes", None)
+        if boxes is not None and getattr(boxes, "conf", None) is not None:
+            try:
+                result_scores = [float(value) for value in boxes.conf.detach().cpu().numpy().tolist()]
+            except AttributeError:
+                result_scores = [float(value) for value in np.asarray(boxes.conf).tolist()]
+
+        for index in range(data.shape[0]):
+            masks.append(data[index])
+            scores.append(result_scores[index] if index < len(result_scores) else float(1.0 - index * 0.01))
+
+    return masks, scores
+
+
+def _run_point_segmentation(
+    temp_path: Path,
+    pil_image: Image.Image,
+    points: list[list[float]],
+    labels: list[int],
+    conf: float,
+    scale: float,
+) -> dict[str, Any]:
+    """Run SAM visual point prompts. Input points are original-image pixels; scale maps to inference size."""
+    scaled_points = [[float(x) * scale, float(y) * scale] for x, y in points]
+    point_labels = [int(label) for label in labels]
+    model = _get_auto_model()
+
+    # Ultralytics SAM treats points shaped (N, 2) as N separate objects (each with 1 point).
+    # For interactive refinement we need ONE object with N points: shape (1, N, 2) / (1, N).
+    prompt_points = [scaled_points]
+    prompt_labels = [point_labels]
+
+    predict_kwargs: dict[str, Any] = {
+        "source": str(temp_path),
+        "points": prompt_points,
+        "labels": prompt_labels,
+        "conf": conf,
+        "device": _get_device(),
+        "retina_masks": True,
+        "verbose": False,
+    }
+
+    try:
+        with _inference_lock:
+            results = model.predict(**predict_kwargs)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    mask_arrays, scores = _extract_mask_arrays(results)
+    if not mask_arrays:
+        raise HTTPException(status_code=422, detail="SAM returned no mask for the given points.")
+
+    # Point-prompt mode edits one target at a time; keep the best mask only.
+    best_index = max(range(len(mask_arrays)), key=lambda index: scores[index])
+    width, height = pil_image.size
+    geometry = _mask_to_geometry(mask_arrays[best_index], width, height)
+    if geometry is None:
+        raise HTTPException(status_code=422, detail="SAM masks could not be converted to geometry.")
+
+    overlay = _render_overlay(pil_image, [mask_arrays[best_index]])
+    candidate = {
+        "id": "cand-0",
+        "score": float(scores[best_index]),
+        "overlay": overlay,
+        **geometry,
+    }
+
+    return {
+        "mode": "points",
+        "width": width,
+        "height": height,
+        "count": 1,
+        "candidates": [candidate],
+        "overlay": overlay,
+        "points": points,
+        "labels": labels,
     }

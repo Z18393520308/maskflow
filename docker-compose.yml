@@ -84,6 +84,7 @@ services:
       MASKFLOW_MINIO_BUCKET: maskflow
       MASKFLOW_AI_DAILY_LIMIT: ${MASKFLOW_AI_DAILY_LIMIT:-10000}
       MASKFLOW_BILLING_DEV_MODE: ${MASKFLOW_BILLING_DEV_MODE:-true}
+      MASKFLOW_PASSWORD_RESET_INLINE: ${MASKFLOW_PASSWORD_RESET_INLINE:-true}
     volumes:
       - maskflow-api-data:/data
     depends_on:

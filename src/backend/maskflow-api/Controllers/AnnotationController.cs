@@ -96,6 +96,79 @@ public sealed class AnnotationController : ControllerBase
         }
     }
 
+    [HttpPost("/api/annotations/points")]
+    public async Task<IActionResult> Points([FromBody] AnnotationPointsRequest request)
+    {
+        var user = store.RequireUser(HttpContext);
+        try
+        {
+            store.EnsureAiQuotaAvailable(user);
+        }
+        catch (BadHttpRequestException ex)
+        {
+            return StatusCode(ex.StatusCode, new { detail = ex.Message });
+        }
+
+        if (request.Points is null || request.Points.Count == 0)
+        {
+            return BadRequest(new { detail = "At least one prompt point is required." });
+        }
+
+        if (request.Labels is null || request.Labels.Count != request.Points.Count)
+        {
+            return BadRequest(new { detail = "points and labels length must match." });
+        }
+
+        if (!request.Labels.Contains(1))
+        {
+            return BadRequest(new { detail = "At least one positive point (label=1) is required." });
+        }
+
+        var file = store.State.Files.FirstOrDefault(x => x.Id == request.FileId && x.UserId == user.Id);
+        if (file is null || !await store.StoredObjectExistsAsync(file.Path)) return NotFound(new { detail = "File not found." });
+
+        await using var slot = await samGate.TryAcquireAsync(HttpContext.RequestAborted);
+        if (slot is null)
+        {
+            return StatusCode(StatusCodes.Status429TooManyRequests, new { detail = "Too many concurrent AI requests. Try again shortly." });
+        }
+
+        using var content = new MultipartFormDataContent();
+        await using var stream = await store.OpenStoredObjectAsync(file.Path);
+        var fileContent = new StreamContent(stream);
+        fileContent.Headers.ContentType = MediaTypeHeaderValue.Parse(file.ContentType ?? "application/octet-stream");
+        content.Add(fileContent, "image", file.Name);
+        content.Add(new StringContent(JsonSerializer.Serialize(request.Points)), "points");
+        content.Add(new StringContent(JsonSerializer.Serialize(request.Labels)), "labels");
+        content.Add(new StringContent(request.Conf.ToString(CultureInfo.InvariantCulture)), "conf");
+
+        try
+        {
+            var client = clientFactory.CreateClient("sam");
+            var response = await client.PostAsync("/api/segment/points", content, HttpContext.RequestAborted);
+            var body = await response.Content.ReadAsStringAsync(HttpContext.RequestAborted);
+            if (response.IsSuccessStatusCode)
+            {
+                await store.ConsumeAiQuotaAsync(user.Id, 1);
+            }
+
+            return new ContentResult
+            {
+                Content = body,
+                ContentType = response.Content.Headers.ContentType?.ToString() ?? "application/json",
+                StatusCode = (int)response.StatusCode
+            };
+        }
+        catch (HttpRequestException ex)
+        {
+            return StatusCode(503, new { detail = $"SAM inference service is unavailable: {ex.Message}" });
+        }
+        catch (TaskCanceledException)
+        {
+            return StatusCode(504, new { detail = "SAM inference service request timed out." });
+        }
+    }
+
     [HttpGet("/api/annotations/file/{fileId:int}")]
     public IActionResult GetByFile(int fileId)
     {
