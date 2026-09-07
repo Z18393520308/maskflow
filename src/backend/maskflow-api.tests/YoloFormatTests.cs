@@ -27,11 +27,11 @@ public class YoloFormatTests
     }
 
     [Fact]
-    public void BuildYoloLine_Segmentation_FallsBackToBoundingBoxWithoutPolygon()
+    public void BuildYoloLine_Segmentation_RejectsBoundingBoxWithoutPolygon()
     {
         var item = Sample() with { Segment = null };
-        var line = MaskFlowStore.BuildYoloLine(item, "segmentation");
-        Assert.Equal("0 0.5 0.5 0.2 0.4", line);
+        Assert.Throws<Microsoft.AspNetCore.Http.BadHttpRequestException>(() => MaskFlowStore.BuildYoloLine(item, "segmentation"));
+        Assert.Empty(MaskFlowStore.BuildYoloTxt([item], "segmentation"));
     }
 
     [Fact]

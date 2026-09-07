@@ -1,10 +1,10 @@
 <script setup>
 import { inject } from "vue";
+import DatasetAnalysisPanel from "../DatasetAnalysisPanel.vue";
 
 const projects = inject("projects");
 const selectedProject = inject("selectedProject");
 const selectedProjectDataTypeLabel = inject("selectedProjectDataTypeLabel");
-const selectedProjectExportHint = inject("selectedProjectExportHint");
 const exportPage = inject("exportPage");
 const loading = inject("loading");
 const formatBytes = inject("formatBytes");
@@ -14,6 +14,7 @@ const createExport = inject("createExport");
 const exportSplitTotal = inject("exportSplitTotal");
 const downloadExportItem = inject("downloadExportItem");
 const refreshExports = inject("refreshExports");
+const validExportConfig = inject("validExportConfig");
 </script>
 
 <template>
@@ -29,18 +30,18 @@ const refreshExports = inject("refreshExports");
       </nav>
       <section class="project-bar">
         <div><strong>导出项目</strong><p>{{ selectedProject?.name || '请先选择项目' }}</p></div>
-        <select v-model="projects.selectedId" @change="selectProject(projects.selectedId)">
+        <select :value="projects.selectedId" @change="selectProject($event.target.value)">
           <option value="">选择项目</option>
           <option v-for="project in projects.rows" :key="project.id" :value="project.id">{{ project.name }} · {{ project.imageCount || 0 }} 张 · {{ project.annotationCount || 0 }} 条标注</option>
         </select>
       </section>
 
+      <DatasetAnalysisPanel v-if="exportPage.tab === 'config'" />
       <section v-if="exportPage.tab === 'config'" class="work-bottom export-config-grid">
         <article class="work-card">
           <h2>导出配置</h2>
           <p>项目：{{ selectedProject?.name || '-' }}</p>
           <p>任务类型：{{ selectedProject ? selectedProjectDataTypeLabel : '-' }}</p>
-          <p>导出格式：{{ selectedProject ? selectedProjectExportHint : 'YOLO txt' }}（仅包含已标注图片）</p>
           <div class="export-format-picker">
             <label :class="{ active: exportPage.format === 'yolo-detect' }">
               <input v-model="exportPage.format" type="radio" value="yolo-detect" />
@@ -50,7 +51,7 @@ const refreshExports = inject("refreshExports");
             <label :class="{ active: exportPage.format === 'yolo-segment' }">
               <input v-model="exportPage.format" type="radio" value="yolo-segment" />
               <span>YOLO 分割</span>
-              <small>优先使用掩码多边形，导出 segment 数据集</small>
+              <small>已分配标签的目标均需有有效分割轮廓</small>
             </label>
             <label :class="{ active: exportPage.format === 'classification-crops' }">
               <input v-model="exportPage.format" type="radio" value="classification-crops" />
@@ -62,9 +63,10 @@ const refreshExports = inject("refreshExports");
             <label>训练集 train %<input v-model.number="exportPage.split.train" type="number" min="0" max="100" /></label>
             <label>验证集 val %<input v-model.number="exportPage.split.val" type="number" min="0" max="100" /></label>
             <label>测试集 test %<input v-model.number="exportPage.split.test" type="number" min="0" max="100" /></label>
+            <label>随机种子<input v-model.number="exportPage.seed" type="number" min="-2147483648" max="2147483647" step="1" /></label>
           </div>
           <p :class="['export-split-total', { invalid: exportSplitTotal() !== 100 }]">当前合计：{{ exportSplitTotal() }}%（需等于 100%）</p>
-          <button class="btn" :disabled="loading || !projects.selectedId || exportSplitTotal() !== 100" @click="createExport">
+          <button class="btn" :disabled="loading || !projects.selectedId || !validExportConfig() || exportPage.analysisLoading || !exportPage.analysis?.canExport" @click="createExport">
             {{ loading ? '正在导出...' : '导出当前项目 ZIP' }}
           </button>
           <p v-if="exportPage.status" class="export-status">{{ exportPage.status }}</p>
@@ -78,12 +80,14 @@ const refreshExports = inject("refreshExports");
   labels/train
   labels/val
   labels/test
-  data.yaml</pre>
+  data.yaml
+  split-report.json</pre>
           <pre v-else>{{ selectedProject?.name || 'project' }}/
   classification/train/{label}/crop.jpg
   classification/val/{label}/crop.jpg
   classification/test/{label}/crop.jpg
-  classes.txt</pre>
+  classes.txt
+  split-report.json</pre>
         </article>
       </section>
 

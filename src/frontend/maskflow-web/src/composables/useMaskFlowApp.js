@@ -1,4 +1,5 @@
-import { computed, nextTick, onMounted, provide, reactive, ref } from "vue";
+import { computed, nextTick, onMounted, provide, reactive, ref, watch } from "vue";
+import { matchesAnnotationFilters } from "../lib/annotationReview";
 import { apiFetch, authHeaders, clearSession, downloadAuthenticated, formatBytes, saveSession, session, user as currentUser } from "../lib/api";
 import {
   buildAnnotationBoxStyle,
@@ -47,6 +48,9 @@ export function useMaskFlowApp() {
   const account = ref(currentUser());
   const message = ref("");
   const loading = ref(false);
+  let annotationSelection = 0;
+  let annotationEditRevision = 0;
+  let analysisRequestId = 0;
 
   const auth = reactive({
     mode: new URLSearchParams(location.search).get("mode") || "login",
@@ -64,6 +68,10 @@ export function useMaskFlowApp() {
     tab: "config",
     format: "yolo-detect",
     split: { train: 70, val: 20, test: 10 },
+    seed: 42,
+    analysis: null,
+    analysisLoading: false,
+    analysisError: "",
     status: "",
     rows: []
   });
@@ -96,6 +104,7 @@ export function useMaskFlowApp() {
     selected: null,
     fileId: null,
     current: null,
+    ready: false,
     preview: "",
     frame: { width: 0, height: 0 },
     annotations: [],
@@ -330,12 +339,14 @@ export function useMaskFlowApp() {
   async function refreshProjects() {
     if (!account.value) return;
     const data = await apiFetch("/api/projects").catch(() => ({ projects: [] }));
+    const previousProjectId = projects.selectedId;
     projects.rows = data.projects || [];
     dashboard.projects = projects.rows;
     if (!projects.selectedId && projects.rows.length) projects.selectedId = projects.rows[0].id;
     if (projects.selectedId && !projects.rows.some((project) => project.id === projects.selectedId)) {
       projects.selectedId = projects.rows[0]?.id || "";
     }
+    if (previousProjectId !== projects.selectedId) syncExportSplitFromProject();
     await loadProjectLabels();
   }
 
@@ -411,6 +422,7 @@ export function useMaskFlowApp() {
 
   async function selectProject(projectId) {
     if (projectId !== projects.selectedId && !canLeaveCurrentAnnotation()) return;
+    annotationSelection++;
     projects.selectedId = projectId;
     syncExportSplitFromProject();
     clearAnnotation();
@@ -439,7 +451,9 @@ export function useMaskFlowApp() {
       annotate.defaultRunLabel = "";
       return;
     }
-    const data = await apiFetch(`/api/projects/${projects.selectedId}/labels`).catch(() => ({ labels: [] }));
+    const projectId = projects.selectedId;
+    const data = await apiFetch(`/api/projects/${projectId}/labels`).catch(() => ({ labels: [] }));
+    if (projectId !== projects.selectedId) return;
     annotate.labels = data.labels ?? [];
     syncDefaultRunLabel();
   }
@@ -494,8 +508,10 @@ export function useMaskFlowApp() {
       files.rows = [];
       return;
     }
-    const query = projects.selectedId ? `?projectId=${encodeURIComponent(projects.selectedId)}` : "";
+    const projectId = projects.selectedId;
+    const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
     const data = await apiFetch(`/api/files${query}`).catch(() => ({ files: [] }));
+    if (projectId !== projects.selectedId) return;
     files.rows = data.files || [];
     if (data.user) {
       account.value = data.user;
@@ -948,7 +964,7 @@ export function useMaskFlowApp() {
   }
 
   async function handleAnnotatePointClick(event) {
-    if (!annotate.pointMode || annotate.drawMode || !annotate.current) return;
+    if (!annotate.pointMode || annotate.drawMode || !annotate.current || !annotate.ready) return;
     if (event.button !== undefined && event.button !== 0 && event.button !== 2) return;
     event.preventDefault();
     const width = annotate.width || event.currentTarget?.querySelector?.("img")?.naturalWidth;
@@ -1133,6 +1149,7 @@ export function useMaskFlowApp() {
   }
 
   function applyAnnotation(annotation, options = {}) {
+    if (annotation.fileId !== annotate.current?.id) return;
     annotate.fileId = annotation.fileId;
     annotate.width = annotation.width || 0;
     annotate.height = annotation.height || 0;
@@ -1149,6 +1166,7 @@ export function useMaskFlowApp() {
   }
 
   function clearAnnotation() {
+    annotate.ready = false;
     annotate.annotations = [];
     annotate.activeId = "";
     annotate.width = 0;
@@ -1350,7 +1368,7 @@ export function useMaskFlowApp() {
     }
   }
 
-  async function loadAnnotatePreview(file) {
+  async function loadAnnotatePreview(file, selection) {
     if (annotate.preview) {
       URL.revokeObjectURL(annotate.preview);
       annotate.preview = "";
@@ -1359,7 +1377,9 @@ export function useMaskFlowApp() {
     if (!file?.downloadUrl) return;
     const response = await fetch(file.downloadUrl, { headers: authHeaders() });
     if (!response.ok) throw new Error("图片预览加载失败");
-    annotate.preview = URL.createObjectURL(await response.blob());
+    const blob = await response.blob();
+    if (selection !== annotationSelection || file.id !== annotate.current?.id) return;
+    annotate.preview = URL.createObjectURL(blob);
     await nextTick();
   }
 
@@ -1385,7 +1405,7 @@ export function useMaskFlowApp() {
   const reviewFilterActive = computed(() => Object.values(annotate.reviewFilters).some((value) => String(value ?? "").trim() !== ""));
   const reviewFilterMatchedAnnotations = computed(() => {
     if (!reviewFilterActive.value) return [];
-    return annotate.annotations.filter(matchesReviewFilters);
+    return annotate.annotations.filter(item => matchesReviewFilters(item, annotate.width, annotate.height));
   });
   const reviewFilterMatchedIds = computed(() => new Set(reviewFilterMatchedAnnotations.value.map((item) => item.id)));
   const saveStateText = computed(() => {
@@ -1394,39 +1414,8 @@ export function useMaskFlowApp() {
     return "等待标注";
   });
 
-  function numberFilterValue(key) {
-    if (String(annotate.reviewFilters[key] ?? "").trim() === "") return null;
-    const value = Number(annotate.reviewFilters[key]);
-    return Number.isFinite(value) ? value / 100 : null;
-  }
-
-  function ratioFilterValue(key) {
-    if (String(annotate.reviewFilters[key] ?? "").trim() === "") return null;
-    const value = Number(annotate.reviewFilters[key]);
-    return Number.isFinite(value) ? value : null;
-  }
-
-  function rangePass(value, min, max) {
-    if (min !== null && value < min) return false;
-    if (max !== null && value > max) return false;
-    return true;
-  }
-
-  function matchesReviewFilters(item) {
-    const box = item.bbox;
-    if (!box) return false;
-    const filters = annotate.reviewFilters;
-    if (filters.label && !labelsEqual(item.label, filters.label)) return false;
-    const area = Number(box.width || 0) * Number(box.height || 0);
-    const aspect = Number(box.height || 0) > 0 ? Number(box.width || 0) / Number(box.height || 0) : 0;
-    const confidence = Number(item.confidence ?? item.Confidence ?? 1);
-    return rangePass(area, numberFilterValue("minArea"), numberFilterValue("maxArea"))
-      && rangePass(Number(box.width || 0), numberFilterValue("minWidth"), numberFilterValue("maxWidth"))
-      && rangePass(Number(box.height || 0), numberFilterValue("minHeight"), numberFilterValue("maxHeight"))
-      && rangePass(Number(box.cx || 0), numberFilterValue("minCenterX"), numberFilterValue("maxCenterX"))
-      && rangePass(Number(box.cy || 0), numberFilterValue("minCenterY"), numberFilterValue("maxCenterY"))
-      && rangePass(aspect, ratioFilterValue("minAspect"), ratioFilterValue("maxAspect"))
-      && rangePass(confidence, ratioFilterValue("minConfidence"), null);
+  function matchesReviewFilters(item, width, height) {
+    return matchesAnnotationFilters(item, annotate.reviewFilters, width, height);
   }
 
   function resetReviewFilters() {
@@ -1450,7 +1439,7 @@ export function useMaskFlowApp() {
     for (const file of candidates) {
       let annotation;
       if (file.id === annotate.current?.id) {
-        annotation = { annotations: annotate.annotations };
+        annotation = { annotations: annotate.annotations, width: annotate.width, height: annotate.height };
       } else {
         try {
           const data = await apiFetch(`/api/annotations/file/${file.id}`);
@@ -1459,7 +1448,8 @@ export function useMaskFlowApp() {
           continue;
         }
       }
-      const count = (annotation.annotations || []).map(normalizeAnnotationItem).filter(matchesReviewFilters).length;
+      const count = (annotation.annotations || []).map(normalizeAnnotationItem)
+        .filter(item => matchesReviewFilters(item, annotation.width, annotation.height)).length;
       if (count) {
         matchedFiles += 1;
         matchedAnnotations += count;
@@ -1496,7 +1486,7 @@ export function useMaskFlowApp() {
           }
         }
         const items = (annotation.annotations || []).map(normalizeAnnotationItem);
-        const nextItems = items.filter((item) => !matchesReviewFilters(item));
+        const nextItems = items.filter((item) => !matchesReviewFilters(item, annotation.width, annotation.height));
         const delta = items.length - nextItems.length;
         if (!delta) continue;
         removed += delta;
@@ -1523,6 +1513,7 @@ export function useMaskFlowApp() {
   }
 
   function markAnnotationDirty(status = "有未保存修改") {
+    annotationEditRevision++;
     annotate.dirty = true;
     annotate.status = status;
   }
@@ -1539,6 +1530,8 @@ export function useMaskFlowApp() {
 
   async function selectAnnotateFile(file) {
     if (file?.id !== annotate.current?.id && !canLeaveCurrentAnnotation()) return;
+    const selection = ++annotationSelection;
+    annotate.ready = false;
     annotate.current = file;
     annotate.fileId = file?.id || null;
     clearAnnotation();
@@ -1556,23 +1549,23 @@ export function useMaskFlowApp() {
         ? "图片已选择，点提示模式可点击抠图"
         : "图片已选择，可单张分割标注或批量标注全部图片";
     try {
-      await loadAnnotatePreview(file);
-    } catch (error) {
-      annotate.status = error.message;
-    }
-    if (file.annotated) {
-      try {
+      await loadAnnotatePreview(file, selection);
+      if (selection !== annotationSelection || file.id !== annotate.current?.id) return;
+      if (file.annotated) {
         const data = await apiFetch(`/api/annotations/file/${file.id}`);
-        applyAnnotation(data.annotation);
-      } catch {
-        clearAnnotation();
+        if (selection === annotationSelection) applyAnnotation(data.annotation);
+      } else {
+        markAnnotationSaved(annotate.pointMode ? "点提示模式：点击目标开始抠图" : "图片已选择，等待自动标注");
       }
-    } else {
-      markAnnotationSaved(annotate.pointMode ? "点提示模式：点击目标开始抠图" : "图片已选择，等待自动标注");
+      if (selection === annotationSelection) annotate.ready = true;
+    } catch (error) {
+      if (selection === annotationSelection) annotate.status = `加载失败：${error.message}，请重新选择图片重试。`;
     }
   }
 
   async function runMaskForFile(file, { updateCurrent = true } = {}) {
+    const selection = annotationSelection;
+    const revision = annotationEditRevision;
     const data = await apiFetch("/api/annotations/auto", {
       method: "POST",
       body: {
@@ -1581,7 +1574,7 @@ export function useMaskFlowApp() {
         defaultLabel: annotate.defaultRunLabel || null
       }
     });
-    if (updateCurrent) applyAnnotation(data.annotation);
+    if (updateCurrent && selection === annotationSelection && revision === annotationEditRevision) applyAnnotation(data.annotation);
     if (data.user) {
       account.value = data.user;
       saveSession({ ...session(), user: data.user });
@@ -1590,7 +1583,7 @@ export function useMaskFlowApp() {
   }
 
   async function runCurrentMask() {
-    if (!annotate.current?.id) {
+    if (!annotate.current?.id || !annotate.ready) {
       annotate.status = "请先选择一张已上传图片";
       return;
     }
@@ -1599,11 +1592,15 @@ export function useMaskFlowApp() {
       return;
     }
     loading.value = true;
+    const file = annotate.current;
+    const selection = annotationSelection;
+    const revision = annotationEditRevision;
     annotate.status = `正在分割标注：${annotate.current.name}`;
     try {
-      await runMaskForFile(annotate.current, { updateCurrent: true });
+      await runMaskForFile(file, { updateCurrent: true });
       await refreshFiles();
-      const refreshed = files.rows.find((file) => file.id === annotate.current.id) || annotate.current;
+      if (selection !== annotationSelection || revision !== annotationEditRevision) return;
+      const refreshed = files.rows.find((item) => item.id === file.id) || file;
       await selectAnnotateFile(refreshed);
       annotate.status = `当前图片已生成 ${annotate.annotations.length} 条标注`;
     } catch (error) {
@@ -1628,10 +1625,14 @@ export function useMaskFlowApp() {
     }
     loading.value = true;
     const currentId = annotate.current?.id || files.rows[0]?.id;
+    const selection = annotationSelection;
+    const projectId = projects.selectedId;
+    const candidates = [...files.rows];
     let success = 0;
     let failed = 0;
     try {
-      for (const [index, file] of files.rows.entries()) {
+      for (const [index, file] of candidates.entries()) {
+        if (projectId !== projects.selectedId) break;
         annotate.status = `AI 自动标注中：${index + 1} / ${files.rows.length} · ${file.name}`;
         try {
           await runMaskForFile(file, { updateCurrent: file.id === currentId });
@@ -1641,6 +1642,7 @@ export function useMaskFlowApp() {
         }
       }
       await refreshFiles();
+      if (selection !== annotationSelection || projectId !== projects.selectedId) return;
       const nextCurrent = files.rows.find((file) => file.id === currentId) || files.rows[0];
       if (nextCurrent) await selectAnnotateFile(nextCurrent);
       annotate.status = failed
@@ -1654,25 +1656,25 @@ export function useMaskFlowApp() {
   }
 
   async function saveAnnotation() {
-    if (!annotate.current?.id) return;
+    if (!annotate.current?.id || !annotate.ready) return;
+    const fileId = annotate.current.id;
+    const selection = annotationSelection;
+    const revision = annotationEditRevision;
     loading.value = true;
-    const annotations = annotate.annotations.map((item) => {
-      const normalized = normalizeAnnotationItem(item);
-      if (isExportableAnnotation(normalized)) normalized.confirmed = true;
-      return normalized;
-    });
+    const annotations = annotate.annotations.map(normalizeAnnotationItem);
     normalizeAnnotationLabels(annotations);
     try {
-      const data = await apiFetch(`/api/annotations/file/${annotate.current.id}`, {
+      const data = await apiFetch(`/api/annotations/file/${fileId}`, {
         method: "PUT",
         body: {
-          fileId: annotate.current.id,
+          fileId,
           width: annotate.width,
           height: annotate.height,
           annotations
         }
       });
-      applyAnnotation(data.annotation, { status: "标注已保存" });
+      if (selection === annotationSelection && revision === annotationEditRevision)
+        applyAnnotation(data.annotation, { status: "标注已保存" });
       await refreshFiles();
     } catch (error) {
       annotate.status = error.message;
@@ -1701,7 +1703,9 @@ export function useMaskFlowApp() {
   }
 
   function downloadCurrentTxt() {
-    const txt = yoloTxt();
+    let txt;
+    try { txt = yoloTxt(); }
+    catch (error) { annotate.status = error.message; return; }
     if (!txt) {
       annotate.status = "没有可导出的已分配标签标注";
       return;
@@ -1818,7 +1822,7 @@ export function useMaskFlowApp() {
   }
 
   function beginManualBox(event) {
-    if (!annotate.drawMode || !annotate.current) return;
+    if (!annotate.drawMode || !annotate.current || !annotate.ready) return;
     if (event.button !== undefined && event.button !== 0) return;
     const point = pointerToYoloPoint(event);
     if (!point) return;
@@ -1914,6 +1918,54 @@ export function useMaskFlowApp() {
     return Number(exportPage.split.train || 0) + Number(exportPage.split.val || 0) + Number(exportPage.split.test || 0);
   }
 
+  function validExportConfig() {
+    return [exportPage.split.train, exportPage.split.val, exportPage.split.test]
+      .every(x => Number.isInteger(x) && x >= 0 && x <= 100)
+      && exportSplitTotal() === 100 && Number.isInteger(exportPage.seed)
+      && exportPage.seed >= -2147483648 && exportPage.seed <= 2147483647;
+  }
+
+  function exportRequest() {
+    return { projectId: projects.selectedId, format: exportPage.format, seed: exportPage.seed, split: { ...exportPage.split } };
+  }
+
+  async function refreshExportAnalysis() {
+    const requestId = ++analysisRequestId;
+    exportPage.analysis = null;
+    exportPage.analysisError = "";
+    if (!projects.selectedId || !validExportConfig()) {
+      exportPage.analysisLoading = false;
+      return;
+    }
+    const request = exportRequest();
+    exportPage.analysisLoading = true;
+    try {
+      const data = await apiFetch("/api/export/analyze", { method: "POST", body: request });
+      if (requestId === analysisRequestId) exportPage.analysis = data.analysis;
+    } catch (error) {
+      if (requestId === analysisRequestId) exportPage.analysisError = error.message;
+    } finally {
+      if (requestId === analysisRequestId) exportPage.analysisLoading = false;
+    }
+  }
+
+  function applyRecommendedSplit() {
+    if (!exportPage.analysis?.recommendationAvailable) return;
+    Object.assign(exportPage.split, exportPage.analysis.recommendedSplit);
+  }
+
+  watch(() => [page.value, projects.selectedId, exportPage.format, exportPage.seed,
+    exportPage.split.train, exportPage.split.val, exportPage.split.test], (_, previous, onCleanup) => {
+    analysisRequestId++;
+    exportPage.analysis = null;
+    exportPage.analysisLoading = false;
+    exportPage.analysisError = "";
+    if (page.value !== "export" || !projects.selectedId || !validExportConfig()) return;
+    exportPage.analysisLoading = true;
+    const timer = setTimeout(refreshExportAnalysis, 250);
+    onCleanup(() => clearTimeout(timer));
+  }, { flush: "sync" });
+
   function formatDateTime(value) {
     if (!value) return "-";
     return new Date(value).toLocaleString();
@@ -1945,8 +1997,8 @@ export function useMaskFlowApp() {
       exportPage.status = "请先选择项目";
       return;
     }
-    if (exportSplitTotal() !== 100) {
-      exportPage.status = "train / val / test 比例之和必须为 100";
+    if (!validExportConfig()) {
+      exportPage.status = "划分比例需为 0–100 的整数且合计 100；随机种子需为有效整数。";
       return;
     }
     if (!annotate.labels.length) {
@@ -1960,15 +2012,7 @@ export function useMaskFlowApp() {
     try {
       const data = await apiFetch("/api/export/dataset", {
         method: "POST",
-        body: {
-          projectId: projects.selectedId,
-          format: exportPage.format,
-          split: {
-            train: Number(exportPage.split.train),
-            val: Number(exportPage.split.val),
-            test: Number(exportPage.split.test)
-          }
-        }
+        body: exportRequest()
       });
       await downloadAuthenticated(data.export.downloadUrl, `${data.export.id}.zip`);
       exportPage.status = `导出成功，文件大小 ${formatBytes(data.export.size)}`;
@@ -2136,7 +2180,7 @@ export function useMaskFlowApp() {
     confirmDeleteAnnotateLabel, cancelDeleteAnnotateLabel, canRunAnnotateAi, formatAnnotationLabel,
     applyLabelToActive, applyAnnotationLabel, syncBatchLabelsFromAnnotations, syncAnnotationLabels, changeAnnotateFiles,
     previewUrl, downloadCurrentTxt, selectProject, createProject, copyCurrentProject, deleteFile, deleteCurrentProject,
-    createExport, exportSplitTotal, downloadExportItem, formatDateTime, needsLogin, uploadFiles,
+    createExport, exportSplitTotal, validExportConfig, refreshExportAnalysis, applyRecommendedSplit, downloadExportItem, formatDateTime, needsLogin, uploadFiles,
     runSegment, selectSegmentFile, showSegmentOverlay, subscribe, saveSettings, changePassword,
     saveNotifications, createApiToken, revokeApiToken, addTeamMember, removeTeamMember, revokeDevice,
     refreshExports, uploadDuplicatePrompt, resolveDuplicateUpload
