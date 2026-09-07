@@ -2,6 +2,8 @@
 
 # MaskFlow
 
+**中文 · [English](./README.en.md)**
+
 **从原始图片到可训练数据集的一站式 AI 标注工作台**
 
 基于 SAM 3、YOLO、Vue 3、ASP.NET Core 与 FastAPI，支持图片管理、智能分割、人工复核和数据集导出。
