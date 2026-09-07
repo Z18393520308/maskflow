@@ -1009,6 +1009,10 @@ public sealed class MaskFlowStore
                 label = null;
                 classId = -1;
             }
+            else if (classId >= 0)
+            {
+                label = projectLabels![classId];
+            }
 
             var box = annotation.Bbox;
             normalized.Add(annotation with
@@ -1032,21 +1036,6 @@ public sealed class MaskFlowStore
     public static string ResolveYoloTask(string? dataType) =>
         NormalizeDataType(dataType) == "segmentation" ? "segment" : "detect";
 
-    static string NormalizeExportFormat(string? format) => (format ?? "yolo").Trim().ToLowerInvariant() switch
-    {
-        "yolo-detect" or "detect" or "detection" => "yolo-detect",
-        "yolo-segment" or "segment" or "segmentation" => "yolo-segment",
-        "classification" or "classification-crops" or "crops" => "classification-crops",
-        _ => "yolo"
-    };
-
-    static string ExportDataType(string exportFormat, string projectDataType) => exportFormat switch
-    {
-        "yolo-detect" => "detection",
-        "yolo-segment" => "segmentation",
-        _ => projectDataType
-    };
-
     string ResolveProjectDataType(int userId, string? projectId)
     {
         if (projectId is null)
@@ -1058,11 +1047,27 @@ public sealed class MaskFlowStore
         return NormalizeDataType(project?.DataType);
     }
 
+    public static bool HasValidSegment(AnnotationItem annotation)
+    {
+        var points = annotation.Segment;
+        if (points is not { Count: >= 6 } || points.Count % 2 != 0
+            || points.Any(x => !double.IsFinite(x) || x < 0 || x > 1)) return false;
+        double area = 0;
+        for (var i = 0; i < points.Count; i += 2)
+        {
+            var next = (i + 2) % points.Count;
+            area += points[i] * points[next + 1] - points[next] * points[i + 1];
+        }
+        return Math.Abs(area) > 1e-12;
+    }
+
     public static string BuildYoloLine(AnnotationItem annotation, string? dataType)
     {
-        if (NormalizeDataType(dataType) == "segmentation" && annotation.Segment is { Count: >= 6 })
+        if (NormalizeDataType(dataType) == "segmentation")
         {
-            return $"{annotation.ClassId} {string.Join(" ", annotation.Segment.Select(FormatYolo))}";
+            if (!HasValidSegment(annotation))
+                throw new BadHttpRequestException("目标缺少有效分割轮廓，请补充分割或改用检测格式。", 400);
+            return $"{annotation.ClassId} {string.Join(" ", annotation.Segment!.Select(FormatYolo))}";
         }
 
         var box = annotation.Bbox;
@@ -1070,76 +1075,46 @@ public sealed class MaskFlowStore
     }
 
     public static string BuildYoloTxt(IEnumerable<AnnotationItem> annotations, string? dataType = "detection") =>
-        string.Join("\n", annotations.Where(IsExportableAnnotation).Select(annotation => BuildYoloLine(annotation, dataType)));
+        string.Join("\n", annotations.Where(IsExportableAnnotation)
+            .Where(x => NormalizeDataType(dataType) != "segmentation" || HasValidSegment(x))
+            .Select(annotation => BuildYoloLine(annotation, dataType)));
 
     public async Task<DatasetExport> CreateDatasetExportAsync(int userId, ExportRequest request)
     {
         var split = request.Split ?? new SplitConfig(70, 20, 10);
-        if (split.Train + split.Val + split.Test != 100)
-        {
-            throw new BadHttpRequestException("Split ratios must sum to 100.", 400);
-        }
+        DatasetSplitter.Validate(split);
 
         DatasetExport? export = null;
         await SaveAsync(async () =>
         {
+            var plan = DatasetExportPlan.Create(State, userId, request);
+            plan.ValidateExport();
             var exportId = "export_" + Util.Id();
             var exportDir = Path.Combine(StorageRoot, userId.ToString(), "exports");
             Directory.CreateDirectory(exportDir);
             var zipPath = Path.Combine(exportDir, $"{exportId}.zip");
-            var files = State.Files
-                .Where(x => x.UserId == userId && x.Kind == "image" && (request.ProjectId is null || x.ProjectId == request.ProjectId))
-                .OrderBy(x => x.CreatedAt)
-                .ToList();
-            var fileIds = files.Select(x => x.Id).ToHashSet();
-            var annotationMap = State.AnnotationSets.Where(x => x.UserId == userId && fileIds.Contains(x.FileId)).ToDictionary(x => x.FileId);
-            var labeledFiles = files.Where(x => annotationMap.ContainsKey(x.Id)).ToList();
-            if (labeledFiles.Count == 0)
-            {
-                throw new BadHttpRequestException("No annotated images found for export.", 400);
-            }
-
-            var exportFormat = NormalizeExportFormat(request.Format);
-            var projectDataType = ResolveProjectDataType(userId, request.ProjectId);
-            var exportDataType = ExportDataType(exportFormat, projectDataType);
+            var annotationMap = plan.Annotations;
+            var labeledFiles = plan.Files;
+            var exportFormat = plan.Format;
+            var exportDataType = plan.DataType;
             var yoloTask = ResolveYoloTask(exportDataType);
 
             using (var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
             {
-                List<string> labels;
-                if (request.ProjectId is not null)
-                {
-                    labels = GetProjectLabels(userId, request.ProjectId);
-                    if (labels.Count == 0)
-                    {
-                        throw new BadHttpRequestException("Project has no labels. Add labels before export.", 400);
-                    }
-                }
-                else
-                {
-                    labels = annotationMap.Values
-                        .SelectMany(x => x.Annotations)
-                        .Where(IsExportableAnnotation)
-                        .Select(x => x.Label!)
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
-                        .ToList();
-                    if (labels.Count == 0)
-                    {
-                        throw new BadHttpRequestException("No labeled annotations found for export.", 400);
-                    }
-                }
+                var labels = plan.Labels;
+                var samples = plan.Samples;
+                var assignments = DatasetSplitter.Assign(samples, split, request.Seed);
 
                 if (exportFormat == "classification-crops")
                 {
-                    await WriteClassificationCropDatasetAsync(archive, labeledFiles, annotationMap, labels, split);
+                    await WriteClassificationCropDatasetAsync(archive, labeledFiles, annotationMap, labels, assignments);
                 }
                 else
                 {
                     for (var index = 0; index < labeledFiles.Count; index++)
                     {
                         var file = labeledFiles[index];
-                        var targetSplit = SplitName(index, labeledFiles.Count, split);
+                        var targetSplit = assignments[file.Id];
                         var extension = Path.GetExtension(file.Name);
                         var stem = SanitizeFileName($"{file.Id}_{Path.GetFileNameWithoutExtension(file.Name)}");
                         var imageEntry = archive.CreateEntry($"images/{targetSplit}/{stem}{extension}");
@@ -1166,10 +1141,16 @@ public sealed class MaskFlowStore
                         writer.WriteLine("names:");
                         for (var i = 0; i < labels.Count; i++)
                         {
-                            writer.WriteLine($"  {i}: {labels[i]}");
+                            writer.WriteLine($"  {i}: {JsonSerializer.Serialize(labels[i])}");
                         }
                     }
                 }
+
+                var reportEntry = archive.CreateEntry("split-report.json");
+                await using (var reportStream = reportEntry.Open())
+                    await JsonSerializer.SerializeAsync(reportStream,
+                        DatasetSplitter.Report(samples, labels, assignments, split, request.Seed),
+                        new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
 
                 var readme = archive.CreateEntry("README.md");
                 using var readmeWriter = new StreamWriter(readme.Open());
@@ -1179,6 +1160,8 @@ public sealed class MaskFlowStore
                 readmeWriter.WriteLine($"Task: {(exportFormat == "classification-crops" ? "classify" : yoloTask)}");
                 readmeWriter.WriteLine($"DataType: {exportDataType}");
                 readmeWriter.WriteLine($"Images: {labeledFiles.Count}");
+                readmeWriter.WriteLine($"Split: stratified by label, grouped by source image; seed={request.Seed}");
+                readmeWriter.WriteLine("See split-report.json for actual per-class image/annotation counts, file assignments and coverage warnings.");
                 readmeWriter.WriteLine($"GeneratedAt: {DateTimeOffset.UtcNow:O}");
             }
 
@@ -1202,7 +1185,7 @@ public sealed class MaskFlowStore
                 File.Delete(zipPath);
             }
 
-            export = new DatasetExport(exportId, userId, request.ProjectId, request.TaskId, "completed", exportPath, zipSize, request with { Format = exportFormat }, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, $"/api/export/{exportId}/download");
+            export = new DatasetExport(exportId, userId, request.ProjectId, request.TaskId, "completed", exportPath, zipSize, request with { Format = exportFormat, Split = split }, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, $"/api/export/{exportId}/download");
             State.Exports.Add(export);
         });
         return export!;
@@ -1213,7 +1196,7 @@ public sealed class MaskFlowStore
         IReadOnlyList<FileItem> labeledFiles,
         IReadOnlyDictionary<int, AnnotationSet> annotationMap,
         IReadOnlyList<string> labels,
-        SplitConfig split)
+        IReadOnlyDictionary<int, string> assignments)
     {
         var samples = labeledFiles
             .SelectMany(file => annotationMap[file.Id].Annotations
@@ -1244,7 +1227,7 @@ public sealed class MaskFlowStore
                 var cropRect = BuildCropRectangle(sample.Annotation.Bbox, image.Width, image.Height);
                 if (cropRect.Width <= 0 || cropRect.Height <= 0) continue;
 
-                var targetSplit = SplitName(exported, samples.Count, split);
+                var targetSplit = assignments[fileId];
                 var labelDir = SanitizeFileName(sample.Annotation.Label ?? "unassigned");
                 var stem = SanitizeFileName($"{fileId}_{Path.GetFileNameWithoutExtension(file.Name)}_{sample.Annotation.Id}");
                 var cropEntry = archive.CreateEntry($"classification/{targetSplit}/{labelDir}/{stem}.jpg");
@@ -1547,12 +1530,4 @@ public sealed class MaskFlowStore
         return new string(value.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray());
     }
 
-    static string SplitName(int index, int total, SplitConfig split)
-    {
-        if (total <= 0) return "train";
-        var ratio = (index + 1) / (double)total * 100;
-        if (ratio <= split.Train) return "train";
-        if (ratio <= split.Train + split.Val) return "val";
-        return "test";
-    }
 }

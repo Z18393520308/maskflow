@@ -50,9 +50,9 @@
             {{ label }}
           </span>
         </div>
-        <button class="btn" :disabled="loading || !annotate.current || !canRunAnnotateAi" @click="runCurrentMask">运行当前图片</button>
+        <button class="btn" :disabled="loading || !annotate.ready || !canRunAnnotateAi" @click="runCurrentMask">运行当前图片</button>
         <button class="btn secondary" :disabled="loading || !files.rows.length || !canRunAnnotateAi" @click="runMasks">批量运行 AI</button>
-        <button class="btn secondary" :disabled="loading || !annotate.dirty" @click="saveAnnotation">保存</button>
+        <button class="btn secondary" :disabled="loading || !annotate.ready || !annotate.dirty" @click="saveAnnotation">保存</button>
         <button class="btn ghost" :disabled="!projects.selectedId || !annotate.labels.length" @click="createExport">导出 ZIP</button>
       </section>
 
@@ -80,7 +80,7 @@
           <p class="queue-status">{{ annotate.status }}</p>
         </aside>
 
-        <section class="work-stage yolo-stage annotate-canvas-panel">
+        <section class="work-stage yolo-stage annotate-canvas-panel" :inert="!annotate.ready">
           <div class="canvas-topbar">
             <button :class="['btn compact-btn', annotate.drawMode ? 'active-tool' : 'secondary']" type="button" :disabled="!annotate.current" @click="toggleManualDrawMode">
               {{ annotate.drawMode ? '退出画框' : '手动画框' }}

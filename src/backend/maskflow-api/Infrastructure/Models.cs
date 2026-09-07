@@ -40,7 +40,7 @@ public record ProjectCreate(string Name, string? Description, string? DataType, 
 public record ProjectCopyRequest(string? Name);
 public record ProjectLabelsRequest(List<string> Labels);
 public record TaskCreate(string Type, string? Title, string? ProjectId, int? FileId, int ImageCount = 1);
-public record ExportRequest(string? ProjectId, string? TaskId, SplitConfig? Split, string Format = "yolo");
+public record ExportRequest(string? ProjectId, string? TaskId, SplitConfig? Split, string Format = "yolo", int Seed = 42);
 public record AnnotationAutoRequest(int FileId, double Conf = 0.25, string? DefaultLabel = null);
 public record AnnotationPointsRequest(int FileId, List<double[]> Points, List<int> Labels, double Conf = 0.25);
 public record AnnotationSaveRequest(int FileId, int Width, int Height, List<AnnotationItem> Annotations);

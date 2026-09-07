@@ -35,13 +35,18 @@ public sealed class ExportController : MaskFlowControllerBase
     {
         var user = CurrentUser();
         var split = request.Split ?? new SplitConfig(70, 20, 10);
-        if (split.Train + split.Val + split.Test != 100)
-        {
-            return BadRequest(new { detail = "Split ratios must sum to 100." });
-        }
+        DatasetSplitter.Validate(split);
 
         var export = await Store.CreateDatasetExportAsync(user.Id, request with { Split = split });
         return Ok(new { export });
+    }
+
+    [HttpPost("analyze")]
+    public IActionResult Analyze([FromBody] ExportRequest request)
+    {
+        var user = CurrentUser();
+        var plan = DatasetExportPlan.Create(Store.State, user.Id, request);
+        return Ok(new { analysis = DatasetAnalysis.Analyze(plan, request.Split ?? new(70, 20, 10), request.Seed) });
     }
 
     [HttpGet("{exportId}")]
