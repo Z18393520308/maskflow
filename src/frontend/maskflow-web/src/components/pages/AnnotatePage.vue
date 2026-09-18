@@ -52,7 +52,7 @@
         </div>
         <button class="btn" :disabled="loading || !annotate.ready || !canRunAnnotateAi" @click="runCurrentMask">运行当前图片</button>
         <button class="btn secondary" :disabled="loading || !files.rows.length || !canRunAnnotateAi" @click="runMasks">批量运行 AI</button>
-        <button class="btn secondary" :disabled="loading || !annotate.ready || !annotate.dirty" @click="saveAnnotation">保存</button>
+        <button class="btn secondary" :disabled="loading || !annotate.ready || (!annotate.dirty && !annotationStats.pending)" @click="saveAnnotation">保存</button>
         <button class="btn ghost" :disabled="!projects.selectedId || !annotate.labels.length" @click="createExport">导出 ZIP</button>
       </section>
 
@@ -91,7 +91,7 @@
             <template v-if="annotate.pointMode">
               <button :class="['btn compact-btn', annotate.pointPolarity === 1 ? 'active-tool' : 'secondary']" type="button" @click="setAnnotatePointPolarity(1)">正向点</button>
               <button :class="['btn compact-btn', annotate.pointPolarity === 0 ? 'active-tool' : 'secondary']" type="button" @click="setAnnotatePointPolarity(0)">负向点</button>
-              <button class="btn compact-btn" type="button" :disabled="!annotate.pointDraft.candidates.length" @click="confirmAnnotatePointTarget">确认目标</button>
+              <button class="btn compact-btn" type="button" :disabled="!annotate.pointDraft.candidates.length" @click="confirmAnnotatePointTarget">添加目标</button>
               <button class="btn secondary compact-btn" type="button" @click="startNewAnnotatePointTarget">新建目标</button>
               <button class="btn secondary compact-btn" type="button" :disabled="!annotate.pointDraft.points.length" @click="clearAnnotatePointDraft">清空点</button>
             </template>
@@ -181,7 +181,7 @@
               <button :class="['btn compact-btn', annotate.reviewFilterOpen ? 'active-tool' : 'secondary']" type="button" :disabled="!annotate.annotations.length" @click="toggleReviewFilterPanel">
                 {{ annotate.reviewFilterOpen ? '收起筛选' : '筛选' }}
               </button>
-              <button class="btn compact-btn" type="button" :disabled="!annotate.annotations.length" @click="saveAnnotation">保存</button>
+              <button class="btn compact-btn" type="button" :disabled="loading || !annotate.ready || !annotate.annotations.length" @click="saveAnnotation">保存</button>
             </div>
           </div>
           <section v-if="annotate.reviewFilterOpen" class="review-filter-panel">

@@ -14,7 +14,7 @@ const user = { id: 1, username: "Review", plan: "Free" };
 await page.addInitScript(user => localStorage.setItem("maskflow.session", JSON.stringify({ token: "test-only", user })), user);
 const files = [1, 2].map(id => ({ id, name: `${id}.jpg`, size: 2000, annotated: true, annotationCount: 1, projectId: "p", downloadUrl: `/api/files/${id}/download` }));
 const annotation = id => ({ fileId: id, width: id === 1 ? 1920 : 1080, height: id === 1 ? 1080 : 1920,
-  annotations: [{ id: `ann${id}`, label: "针尖", classId: 0, confirmed: true, confidence: 1,
+  annotations: [{ id: `ann${id}`, label: "针尖", classId: 0, confirmed: false, confidence: 1,
     bbox: { cx: .5, cy: .5, width: 100 / 1920, height: 100 / 1080 }, segment: [.1, .1, .5, .1, .5, .5] }] });
 let releaseA;
 let aRequested;
@@ -22,6 +22,7 @@ const startedA = new Promise(resolve => { aRequested = resolve; });
 const holdA = new Promise(resolve => { releaseA = resolve; });
 let delayA = true;
 let putBodies = [];
+let failSave = false;
 let failAnalysis = false;
 const analysisFixture = request => {
   const classes = ["针尖", "瓶盖", "缺损"].map((label, i) => ({ label, images: [100, 30, 5][i], annotations: [200, 60, 10][i],
@@ -50,7 +51,11 @@ await page.route("**/api/**", async route => {
     return;
   } else if (/\/annotations\/file\/\d+$/.test(path)) {
     const id = Number(path.split("/").at(-1));
-    if (request.method() === "PUT") { const body = request.postDataJSON(); putBodies.push(body); data = { annotation: body }; }
+    if (request.method() === "PUT") {
+      const body = request.postDataJSON(); putBodies.push(body);
+      if (failSave) { await route.fulfill({ status: 503, json: { detail: "保存失败" } }); return; }
+      data = { annotation: body };
+    }
     else {
       if (id === 1 && delayA) { aRequested(); await holdA; }
       data = { annotation: annotation(id) };
@@ -75,12 +80,43 @@ try {
     const a = document.querySelector("#app").__vue_app__._instance.provides.annotate;
     return [a.current.id, a.fileId, a.annotations[0].id];
   }), [2, 2, "ann2"]);
-  await page.locator(".confirm-dot").click();
   await page.locator(".annotate-topbar").getByRole("button", { name: "保存", exact: true }).click();
   await page.waitForFunction(() => !document.querySelector("#app").__vue_app__._instance.provides.loading.value);
   assert.equal(putBodies[0].fileId, 2);
-  assert.equal(putBodies[0].annotations[0].confirmed, false);
-  assert.equal(await page.locator(".confirm-dot.unconfirmed").count(), 1);
+  assert.equal(putBodies[0].annotations[0].confirmed, true);
+  assert.equal(await page.locator(".confirm-dot.unconfirmed").count(), 0);
+
+  await page.evaluate(() => {
+    const app = document.querySelector("#app").__vue_app__._instance.provides;
+    app.annotate.defaultRunLabel = "针尖";
+    app.annotate.pointDraft.candidates = [{
+      yoloBox: { cx: .5, cy: .5, width: .2, height: .2 },
+      yoloSegments: [[.4, .4, .6, .4, .6, .6]], score: .9
+    }];
+    app.confirmAnnotatePointTarget();
+    app.annotate.annotations.push({ ...app.annotate.annotations[1], id: "unassigned", label: null, classId: -1 });
+  });
+  assert.deepEqual(await page.evaluate(() => {
+    const a = document.querySelector("#app").__vue_app__._instance.provides.annotate;
+    return [a.annotations[1].confirmed, a.status.includes("待人工核查")];
+  }), [false, true]);
+  assert.equal(putBodies.length, 1, "Adding a point target must not save or confirm it");
+  failSave = true;
+  await page.evaluate(() => document.querySelector("#app").__vue_app__._instance.provides.saveAnnotation());
+  assert.deepEqual(await page.evaluate(() => {
+    const a = document.querySelector("#app").__vue_app__._instance.provides.annotate;
+    return [a.annotations[1].label, a.annotations[1].confirmed, a.dirty];
+  }), ["针尖", false, true]);
+  failSave = false;
+  await page.locator(".annotate-topbar").getByRole("button", { name: "保存", exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector("#app").__vue_app__._instance.provides.loading.value);
+  assert.deepEqual(putBodies.at(-1).annotations.map(a => a.confirmed), [true, true, false]);
+  assert.deepEqual(await page.evaluate(() => {
+    const a = document.querySelector("#app").__vue_app__._instance.provides.annotate;
+    const states = a.annotations.map(item => item.confirmed);
+    a.annotations.splice(1);
+    return states;
+  }), [true, true, false]);
 
   putBodies = [];
   const matches = await page.evaluate(async () => {
@@ -115,7 +151,7 @@ try {
   await page.getByRole("alert").waitFor();
   assert.equal(await page.getByRole("button", { name: "导出当前项目 ZIP" }).isDisabled(), true);
   assert.deepEqual(errors, []);
-  console.log("PASS: delayed image selection, confirmation persistence, global aspect deletion, recommendation application, error states, desktop/mobile layout.");
+  console.log("PASS: delayed image selection, save confirms labels, point default label, failed save retry, unassigned stays pending, global aspect deletion, recommendation application, error states, desktop/mobile layout.");
 } finally {
   releaseA();
   await browser.close();
