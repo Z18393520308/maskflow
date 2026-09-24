@@ -1094,11 +1094,11 @@ export function useMaskFlowApp() {
     markAnnotationDirty(
       segmentCoords
         ? label
-          ? `已确认 ${label}（框+掩膜）。下一个物体请先点「新建目标」`
-          : "已确认目标（框+掩膜）。下一个物体请先点「新建目标」"
+          ? `已添加 ${label}（框+掩膜），待人工核查`
+          : "已添加目标（框+掩膜），待分配类别和人工核查"
         : label
-          ? `已确认 ${label}（仅框）。下一个物体请先点「新建目标」`
-          : "已确认目标（仅框）。下一个物体请先点「新建目标」"
+          ? `已添加 ${label}（仅框），待人工核查`
+          : "已添加目标（仅框），待分配类别和人工核查"
     );
   }
 
@@ -1663,6 +1663,7 @@ export function useMaskFlowApp() {
     loading.value = true;
     const annotations = annotate.annotations.map(normalizeAnnotationItem);
     normalizeAnnotationLabels(annotations);
+    for (const item of annotations) item.confirmed = isExportableAnnotation(item);
     try {
       const data = await apiFetch(`/api/annotations/file/${fileId}`, {
         method: "PUT",
@@ -1687,7 +1688,7 @@ export function useMaskFlowApp() {
     const item = annotate.annotations.find((a) => a.id === annotationId);
     if (item) {
       item.confirmed = !isAnnotationConfirmed(item);
-      markAnnotationDirty(item.confirmed ? "目标已人工确认，记得保存" : "目标已取消确认，记得保存");
+      markAnnotationDirty(item.confirmed ? "目标已人工确认，记得保存" : "目标待人工确认");
     }
   }
 
